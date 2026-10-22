@@ -1,6 +1,5 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:material_ui/material_ui.dart';
-import 'package:permission_handler/permission_handler.dart';
 
 import '../data/book.dart';
 import '../data/category.dart';
@@ -21,8 +20,7 @@ class LibraryScreen extends StatefulWidget {
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
 
-class _LibraryScreenState extends State<LibraryScreen>
-    with WidgetsBindingObserver {
+class _LibraryScreenState extends State<LibraryScreen> {
   final _searchController = TextEditingController();
   List<Book> _books = const [];
   List<BookCategory> _categories = const [];
@@ -41,14 +39,12 @@ class _LibraryScreenState extends State<LibraryScreen>
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     _lib.addListener(_onLibraryChanged);
     _init();
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
     _lib.removeListener(_onLibraryChanged);
     _searchController.dispose();
     super.dispose();
@@ -56,31 +52,6 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   void _onLibraryChanged() {
     _reload();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Retour dans l'appli (après un téléchargement dans le navigateur, par
-    // exemple) : on regarde s'il y a de nouveaux PDF dans Téléchargements.
-    if (state == AppLifecycleState.resumed) _checkDownloads();
-  }
-
-  bool _checkingDownloads = false;
-
-  /// Importe les nouveaux PDF du dossier Téléchargements, si l'option est
-  /// activée dans les Réglages et que l'accès aux fichiers est autorisé.
-  Future<void> _checkDownloads() async {
-    if (_checkingDownloads || !await _lib.watchDownloadsEnabled()) return;
-    if (!await Permission.manageExternalStorage.isGranted) return;
-    _checkingDownloads = true;
-    try {
-      final report = await _lib.importFromDownloads();
-      if (!mounted || (report.added == 0 && report.failed.isEmpty)) return;
-      _offerUpload(
-          'Téléchargements : ${report.summary}', report.addedIds);
-    } finally {
-      _checkingDownloads = false;
-    }
   }
 
   /// Message après un import, avec un bouton pour envoyer aussi les
@@ -128,7 +99,6 @@ class _LibraryScreenState extends State<LibraryScreen>
     _reversed = await _lib.db.getSetting('tri_inverse') == '1';
     _filter = LibraryFilter.fromKey(await _lib.db.getSetting('filtre'));
     await _reload();
-    await _checkDownloads();
     if (_lib.hasServer) await _sync(silent: true);
   }
 
@@ -435,7 +405,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           }
         case 'pin':
           await _lib.setPinned(book, true);
-          if (!book.onDevice && mounted) await openBookDownloadOnly(book);
+          if (!book.onDevice && mounted) await _downloadBook(book);
         case 'unpin':
           await _lib.setPinned(book, false);
         case 'delete':
@@ -448,7 +418,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   /// Épingler un livre absent du téléphone le télécharge tout de suite.
-  Future<void> openBookDownloadOnly(Book book) async {
+  Future<void> _downloadBook(Book book) async {
     await runWithProgress<void>(
       context,
       'Téléchargement',
@@ -792,10 +762,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         _buildSortBar(books),
         Expanded(
           child: RefreshIndicator(
-            onRefresh: () async {
-              await _checkDownloads();
-              await (_lib.hasServer ? _sync() : _reload());
-            },
+            onRefresh: () => _lib.hasServer ? _sync() : _reload(),
             child: books.isEmpty ? _buildNoResult() : _buildList(books),
           ),
         ),

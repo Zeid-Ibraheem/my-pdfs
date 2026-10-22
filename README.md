@@ -19,7 +19,7 @@ Lecteur et bibliothèque PDF personnelle pour Android (Flutter), avec son propre
 - Catégories créées par toi (un livre peut être dans plusieurs) + filtres automatiques : En cours, Pas commencés, Terminés.
 - Tri visible au-dessus de la liste : lus récemment, titre, date d'ajout, progression, nombre de pages, taille, avec ordre inverse.
 - Recherche par titre (sans tenir compte des accents).
-- Import manuel (bouton Importer) ou automatique depuis le dossier Téléchargements (option dans Réglages, demande l'« accès à tous les fichiers »). Les livres importés restent sur le téléphone ; le bouton nuage de chaque livre les envoie sur le serveur.
+- Import avec le bouton « Importer ». Les livres importés restent sur le téléphone ; le bouton nuage de chaque livre les envoie sur le serveur.
 
 **Serveur (onglets Recherche, Découvrir, Réglages)**
 - Les livres du serveur apparaissent dans la bibliothèque comme les autres et **se lisent directement depuis le serveur**, sans être enregistrés sur le téléphone : seules les pages affichées sont transférées (requêtes HTTP partielles).
@@ -87,4 +87,5 @@ test/                          tests de l'appli
 | « Serveur injoignable » | Tailscale activé sur le téléphone ? Serveur allumé ? `systemctl status my-pdfs` sur le serveur |
 | « Jeton refusé » | Recopie le jeton : `sed -n 's/^MYPDFS_TOKEN=//p' ~/my-pdfs-data/server.env` |
 | Erreur de compilation native (NDK) | Android Studio > SDK Manager > SDK Tools > NDK |
+| `flutter test` : « No compiler configured » | pdfrx compile PDFium pour le PC pendant les tests : `sudo pacman -S --needed clang lld llvm` |
 | `minSdkVersion` trop bas | `android/app/build.gradle.kts` : `minSdk = 24` |

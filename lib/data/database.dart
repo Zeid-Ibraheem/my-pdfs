@@ -18,7 +18,8 @@ import 'category.dart';
 /// 1. livres, marque-pages, réglages
 /// 2. catégories et annotations (surlignages, notes)
 /// 3. emplacement des livres (téléphone / serveur) et épinglage
-/// 4. fichiers déjà vus dans le dossier Téléchargements
+/// 4. table d'une ancienne option (import depuis Téléchargements), retirée ;
+///    gardée pour qu'une base déjà mise à jour s'ouvre toujours
 class AppDatabase {
   AppDatabase._(this._db, this.path);
 
@@ -367,21 +368,6 @@ class AppDatabase {
     return {
       for (final row in rows) row['book_id'] as String: row['n'] as int,
     };
-  }
-
-  // ------------------------------------------------- Dossier Téléchargements
-
-  /// Fichiers déjà traités : chemin → « taille:date de modification ».
-  Future<Map<String, String>> seenDownloads() async {
-    final rows = await _db.query('seen_downloads');
-    return {
-      for (final row in rows) row['path'] as String: row['signature'] as String,
-    };
-  }
-
-  Future<void> markDownloadSeen(String path, String signature) async {
-    await _db.insert('seen_downloads', {'path': path, 'signature': signature},
-        conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   // -------------------------------------------------------------- Réglages

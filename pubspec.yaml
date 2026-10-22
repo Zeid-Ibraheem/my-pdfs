@@ -19,7 +19,6 @@ dependencies:
   path: ^1.9.1
   path_provider: ^2.1.6
   pdfrx: ^2.9.0
-  permission_handler: ^13.0.2
   sqflite: ^2.4.5
   url_launcher: ^6.3.3
 
