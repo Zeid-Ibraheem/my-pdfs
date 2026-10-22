@@ -1,4 +1,4 @@
-import 'package:bibli/util/text.dart';
+import 'package:my_pdfs/util/text.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {

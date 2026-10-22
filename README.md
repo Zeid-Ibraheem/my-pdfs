@@ -1,4 +1,4 @@
-# Bibli
+# My PDFs
 
 Lecteur et bibliothèque PDF personnelle pour Android, en Flutter.
 
@@ -19,7 +19,7 @@ Limite connue : sur un PDF scanné (pages en image), il n'y a pas de texte à co
 Prérequis : Flutter **3.47 ou plus** (`flutter upgrade`), le SDK Android, et le téléphone en mode débogage USB.
 
 ```bash
-cd bibli
+cd my_pdfs
 chmod +x setup.sh
 ./setup.sh            # une seule fois : crée android/, ajoute les paquets, vérifie le code
 flutter run --release # installe et lance sur le téléphone branché
@@ -46,7 +46,7 @@ test/text_test.dart         tests des fonctions de texte
 
 Choix importants :
 
-- Les PDF ne sont jamais modifiés. Marque-pages et progression vivent dans la base `bibli.db`, liés à l'empreinte du fichier.
+- Les PDF ne sont jamais modifiés. Marque-pages et progression vivent dans la base `my_pdfs.db`, liés à l'empreinte du fichier.
 - La base ne stocke que le nom du fichier (`<empreinte>.pdf`), pas son chemin complet, qui peut changer d'un profil Android à l'autre.
 
 ## Feuille de route
@@ -54,7 +54,7 @@ Choix importants :
 1. ~~Lecteur local~~ (cette version)
 2. Catégories (manuelles et automatiques) et notes par page
 3. Stockage sur le serveur debi (200 Go) et cache local
-4. Sauvegarde de `bibli.db` sur debi
+4. Sauvegarde de `my_pdfs.db` sur debi
 5. Recherche plein texte (OCR plus tard)
 6. Recherche de livres libres en ligne (Internet Archive, Open Library, Gallica)
 

@@ -6,11 +6,11 @@ import 'ui/library_screen.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final library = await Library.open();
-  runApp(BibliApp(library: library));
+  runApp(PdfApp(library: library));
 }
 
-class BibliApp extends StatelessWidget {
-  const BibliApp({super.key, required this.library});
+class PdfApp extends StatelessWidget {
+  const PdfApp({super.key, required this.library});
 
   final Library library;
 
@@ -18,7 +18,7 @@ class BibliApp extends StatelessWidget {
   Widget build(BuildContext context) {
     const seed = Color(0xFF3D5A80);
     return MaterialApp(
-      title: 'Bibli',
+      title: 'My PDFs',
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.system,
       theme: ThemeData(colorSchemeSeed: seed, brightness: Brightness.light),

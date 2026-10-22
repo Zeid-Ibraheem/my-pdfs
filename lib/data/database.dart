@@ -6,7 +6,7 @@ import 'book.dart';
 
 /// Base SQLite locale : livres, marque-pages et réglages.
 ///
-/// Tout tient dans un seul fichier (bibli.db) : c'est lui qu'on sauvegardera
+/// Tout tient dans un seul fichier (my_pdfs.db) : c'est lui qu'on sauvegardera
 /// sur debi en phase 4.
 class AppDatabase {
   AppDatabase._(this._db);
@@ -16,7 +16,7 @@ class AppDatabase {
   static Future<AppDatabase> open() async {
     final dir = await getDatabasesPath();
     final db = await openDatabase(
-      p.join(dir, 'bibli.db'),
+      p.join(dir, 'my_pdfs.db'),
       version: 1,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
