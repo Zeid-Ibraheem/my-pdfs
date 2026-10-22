@@ -168,6 +168,12 @@ class ServerApi {
 
   Map<String, String> get _auth => {'Authorization': 'Bearer $token'};
 
+  /// En-têtes d'authentification (pour la lecture directe d'un PDF).
+  Map<String, String> get authHeaders => _auth;
+
+  /// Adresse du fichier PDF d'un livre sur le serveur.
+  Uri fileUri(String id) => _uri('/api/books/$id/file');
+
   Uri _uri(String path, [Map<String, String>? query]) {
     final uri = Uri.parse('$baseUrl$path');
     return query == null ? uri : uri.replace(queryParameters: query);
@@ -182,19 +188,39 @@ class ServerApi {
     } on TimeoutException {
       throw const ServerException(
           'Le serveur met trop de temps à répondre (Tailscale activé ?)');
-    } on SocketException {
+    } on SocketException catch (e) {
+      throw ServerException(_unreachable(e.osError?.message ?? e.message));
+    } on HandshakeException {
       throw const ServerException(
-          'Serveur injoignable : vérifie que Tailscale est activé sur le '
-          'téléphone et que le serveur est allumé');
+          'L’adresse commence par https:// : le serveur utilise http://');
     } on http.ClientException catch (e) {
       // Les erreurs de connexion (serveur éteint, Tailscale coupé…)
       // arrivent ici dans les versions récentes du paquet http.
-      throw ServerException(
-          'Serveur injoignable (Tailscale activé ? serveur allumé ?) : '
-          '${e.message}');
+      throw ServerException(_unreachable(e.message));
     } on FormatException {
       throw const ServerException('Réponse inattendue du serveur');
+    } catch (e) {
+      throw ServerException('Erreur inattendue : $e');
     }
+  }
+
+  /// Message d'erreur réseau, avec le détail technique pour le diagnostic.
+  static String _unreachable(String detail) {
+    final lower = detail.toLowerCase();
+    final String hint;
+    if (lower.contains('permission denied') || lower.contains('errno = 13')) {
+      hint = 'Android refuse l’accès réseau à l’appli : vérifie la '
+          'permission « Réseau » de My PDFs dans les paramètres';
+    } else if (lower.contains('failed host lookup')) {
+      hint = 'Nom du serveur introuvable : utilise son adresse IP en 100.x';
+    } else if (lower.contains('cleartext')) {
+      hint = 'Android bloque le HTTP simple : relance ./setup.sh puis '
+          'réinstalle l’appli';
+    } else {
+      hint = 'Serveur injoignable : vérifie que Tailscale est activé dans ce '
+          'profil et que le serveur est allumé';
+    }
+    return '$hint.\nDétail : $detail';
   }
 
   void _check(int status, List<int> body) {

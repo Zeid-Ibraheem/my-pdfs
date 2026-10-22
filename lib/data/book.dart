@@ -48,10 +48,13 @@ class Book {
   bool get finished => pageCount != null && lastPage >= pageCount!;
 
   /// Progression entre 0 et 1, ou `null` si le nombre de pages est inconnu.
+  /// Page 1 = 0 %, dernière page = 100 % (un livre juste ouvert n'affiche
+  /// donc pas 50 % parce qu'il n'a que 2 pages).
   double? get progress {
     final count = pageCount;
     if (count == null || count <= 0) return null;
-    return (lastPage / count).clamp(0.0, 1.0).toDouble();
+    if (count == 1) return lastPage >= 1 ? 1.0 : 0.0;
+    return ((lastPage - 1) / (count - 1)).clamp(0.0, 1.0).toDouble();
   }
 
   factory Book.fromRow(Map<String, Object?> row) {

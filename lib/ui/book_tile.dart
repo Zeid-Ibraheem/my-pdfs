@@ -14,6 +14,7 @@ class BookTile extends StatelessWidget {
     this.categoryNames = const [],
     this.annotationCount = 0,
     this.serverConfigured = false,
+    this.onUpload,
     this.onTap,
     this.onLongPress,
   });
@@ -23,6 +24,9 @@ class BookTile extends StatelessWidget {
   final List<String> categoryNames;
   final int annotationCount;
   final bool serverConfigured;
+
+  /// Envoi sur le serveur (bouton affiché sur les livres seulement ici).
+  final VoidCallback? onUpload;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
 
@@ -84,7 +88,15 @@ class BookTile extends StatelessWidget {
                 ],
               ),
             ),
-            if (location != null) ...[
+            if (book.onDevice && !book.onServer && serverConfigured &&
+                onUpload != null)
+              IconButton(
+                icon: const Icon(Icons.cloud_upload_outlined),
+                tooltip: 'Seulement sur le téléphone : envoyer sur le serveur',
+                visualDensity: VisualDensity.compact,
+                onPressed: onUpload,
+              )
+            else if (location != null) ...[
               const SizedBox(width: 8),
               Tooltip(
                 message: location.$2,
@@ -110,7 +122,7 @@ class BookTile extends StatelessWidget {
       return (Icons.cloud_done_outlined, 'Sur le téléphone et sur le serveur');
     }
     if (!book.onDevice && book.onServer) {
-      return (Icons.cloud_outlined, 'Sur le serveur : téléchargé à l’ouverture');
+      return (Icons.cloud_outlined, 'Sur le serveur : se lit sans téléchargement');
     }
     if (book.onDevice && serverConfigured) {
       return (Icons.smartphone, 'Seulement sur le téléphone');

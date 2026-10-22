@@ -12,7 +12,7 @@ flutter create --platforms=android --org io.github.zeidibraheem --project-name m
 rm -f test/widget_test.dart # test d'exemple généré, il ne correspond pas à l'appli
 
 echo "== Ajout des paquets (dernières versions compatibles) =="
-flutter pub add pdfrx material_ui file_picker sqflite path_provider path crypto http url_launcher
+flutter pub add pdfrx material_ui file_picker sqflite path_provider path crypto http url_launcher permission_handler
 flutter pub add dev:flutter_lints
 
 MANIFEST=android/app/src/main/AndroidManifest.xml
@@ -26,6 +26,11 @@ sed -i 's/android:label="my_pdfs"/android:label="My PDFs"/' "$MANIFEST"
 #   de Tailscale, et le serveur n'est joignable que par lui.
 if ! grep -q 'android.permission.INTERNET' "$MANIFEST"; then
   sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$MANIFEST"
+fi
+# Accès à tous les fichiers : seulement pour l'import automatique depuis le
+# dossier Téléchargements (option désactivée tant qu'on ne l'active pas).
+if ! grep -q 'MANAGE_EXTERNAL_STORAGE' "$MANIFEST"; then
+  sed -i 's|<application|<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <application|' "$MANIFEST"
 fi
 if ! grep -q 'usesCleartextTraffic' "$MANIFEST"; then
   sed -i 's|<application|<application\n        android:usesCleartextTraffic="true"|' "$MANIFEST"

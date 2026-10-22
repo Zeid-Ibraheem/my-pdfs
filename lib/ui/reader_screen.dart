@@ -78,9 +78,15 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _hasSelection = false;
   Timer? _saveTimer;
 
-  // Recherche dans le livre (moteur de pdfrx).
-  late final PdfTextSearcher _searcher = PdfTextSearcher(_controller)
-    ..addListener(_onSearchChanged);
+  // Recherche dans le livre (moteur de pdfrx). Créé seulement quand le
+  // lecteur est prêt : avant, le contrôleur n'est pas encore relié au
+  // document et pdfrx lève une erreur (écran gris en version release).
+  PdfTextSearcher? _searcher;
+
+  // Lecture depuis le serveur : adresse et en-têtes calculés une seule fois
+  // (de nouveaux objets à chaque affichage feraient recharger le livre).
+  Uri? _remoteUri;
+  Map<String, String>? _remoteHeaders;
   final _searchField = TextEditingController();
   bool _searchMode = false;
 
@@ -93,6 +99,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     WidgetsBinding.instance.addObserver(this);
     _page = math.max(1, widget.initialPage ?? _book.lastPage);
     _pageCount = _book.pageCount;
+    final api = _lib.api;
+    if (!_book.onDevice && _book.onServer && api != null) {
+      _remoteUri = api.fileUri(_book.id);
+      _remoteHeaders = api.authHeaders;
+    }
     _lib.db.markOpened(_book.id);
     _loadState();
   }
@@ -112,8 +123,11 @@ class _ReaderScreenState extends State<ReaderScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _saveNow();
-    _searcher.removeListener(_onSearchChanged);
-    _searcher.dispose();
+    final searcher = _searcher;
+    if (searcher != null) {
+      searcher.removeListener(_onSearchChanged);
+      searcher.dispose();
+    }
     _searchField.dispose();
     super.dispose();
   }
@@ -125,29 +139,37 @@ class _ReaderScreenState extends State<ReaderScreen>
   void _openSearch() => setState(() => _searchMode = true);
 
   void _closeSearch() {
-    _searcher.resetTextSearch();
+    _searcher?.resetTextSearch();
     _searchField.clear();
     setState(() => _searchMode = false);
   }
 
   void _runSearch(String query) {
+    final searcher = _searcher;
+    if (searcher == null) return; // livre pas encore chargé
     final text = query.trim();
     if (text.isEmpty) {
-      _searcher.resetTextSearch();
+      searcher.resetTextSearch();
     } else {
-      _searcher.startTextSearch(text, caseInsensitive: true);
+      searcher.startTextSearch(text, caseInsensitive: true);
     }
   }
 
   String _searchCounter() {
-    if (_searchField.text.trim().isEmpty) return '';
-    final count = _searcher.matches.length;
-    if (count == 0) return _searcher.isSearching ? '' : '0';
-    final index = _searcher.currentIndex;
+    final searcher = _searcher;
+    if (searcher == null || _searchField.text.trim().isEmpty) return '';
+    final count = searcher.matches.length;
+    if (count == 0) return searcher.isSearching ? '' : '0';
+    final index = searcher.currentIndex;
     return '${index == null ? 0 : index + 1}/$count';
   }
 
+  void _paintSearchMatches(Canvas canvas, Rect pageRect, PdfPage page) {
+    _searcher?.pageTextMatchPaintCallback(canvas, pageRect, page);
+  }
+
   AppBar _buildSearchBar() {
+    final searcher = _searcher;
     return AppBar(
       leading: IconButton(
         icon: const Icon(Icons.close),
@@ -166,7 +188,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         onSubmitted: _runSearch,
       ),
       actions: [
-        if (_searcher.isSearching)
+        if (searcher != null && searcher.isSearching)
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 8),
             child: SizedBox(
@@ -179,14 +201,16 @@ class _ReaderScreenState extends State<ReaderScreen>
         IconButton(
           icon: const Icon(Icons.keyboard_arrow_up),
           tooltip: 'Résultat précédent',
-          onPressed:
-              _searcher.hasMatches ? () => _searcher.goToPrevMatch() : null,
+          onPressed: searcher != null && searcher.hasMatches
+              ? () => searcher.goToPrevMatch()
+              : null,
         ),
         IconButton(
           icon: const Icon(Icons.keyboard_arrow_down),
           tooltip: 'Résultat suivant',
-          onPressed:
-              _searcher.hasMatches ? () => _searcher.goToNextMatch() : null,
+          onPressed: searcher != null && searcher.hasMatches
+              ? () => searcher.goToNextMatch()
+              : null,
         ),
       ],
     );
@@ -377,6 +401,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   // ----------------------------------------------------- Rappels du lecteur
 
   void _onViewerReady(PdfDocument document, PdfViewerController controller) {
+    _searcher ??= PdfTextSearcher(controller)..addListener(_onSearchChanged);
     final count = document.pages.length;
     if (count != _pageCount) {
       _update(() => _pageCount = count);
@@ -600,6 +625,68 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   // -------------------------------------------------------------------- UI
 
+  /// Livre lu directement depuis le serveur, sans copie sur le téléphone.
+  bool get _remote => _remoteUri != null;
+
+  PdfViewerParams _viewerParams() {
+    return PdfViewerParams(
+      backgroundColor: const Color(0xFFE0E0E0),
+      onViewerReady: _onViewerReady,
+      onPageChanged: _onPageChanged,
+      pagePaintCallbacks: [_paintAnnotations, _paintSearchMatches],
+      textSelectionParams: PdfTextSelectionParams(
+        onTextSelectionChange: (selection) =>
+            _update(() => _hasSelection = selection.hasSelectedText),
+      ),
+      viewerOverlayBuilder: (context, size, handleLinkTap) => [
+        PdfViewerScrollThumb(
+          controller: _controller,
+          orientation: ScrollbarOrientation.right,
+          thumbSize: const Size(44, 28),
+          thumbBuilder: (context, thumbSize, pageNumber, controller) =>
+              DecoratedBox(
+            decoration: const BoxDecoration(
+              color: Color(0xDD000000),
+              borderRadius: BorderRadius.horizontal(left: Radius.circular(14)),
+            ),
+            child: Center(
+              child: Text(
+                pageNumber.toString(),
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildViewer() {
+    // Lu une seule fois à l'ouverture : ne pas y mettre _page, sinon le
+    // lecteur serait reconfiguré à chaque changement de page.
+    final initialPage = math.max(1, widget.initialPage ?? _book.lastPage);
+    final remoteUri = _remoteUri;
+    final remoteHeaders = _remoteHeaders;
+    if (remoteUri != null && remoteHeaders != null) {
+      // Lecture par morceaux (requêtes HTTP partielles) : seules les pages
+      // affichées sont transférées, rien n'est enregistré sur le téléphone.
+      return PdfViewer.uri(
+        remoteUri,
+        headers: remoteHeaders,
+        preferRangeAccess: true,
+        controller: _controller,
+        initialPageNumber: initialPage,
+        params: _viewerParams(),
+      );
+    }
+    return PdfViewer.file(
+      _lib.pathOf(_book),
+      controller: _controller,
+      initialPageNumber: initialPage,
+      params: _viewerParams(),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -608,9 +695,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     final notesHere = _annotations
         .where((a) => a.page == _page || a.rects.containsKey(_page))
         .length;
-    final position = count == null
-        ? 'Page $_page'
-        : 'Page $_page / $count · ${(_page * 100 / count).round()} %';
+    final where = _remote ? ' · serveur' : '';
+    final position = count == null || count == 0
+        ? 'Page $_page$where'
+        : 'Page $_page / $count · ${count == 1 ? 100 : ((_page - 1) * 100 / (count - 1)).round()} %$where';
 
     return PopScope(
       canPop: !_searchMode,
@@ -711,52 +799,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             Positioned.fill(
               child: ColorFiltered(
                 colorFilter: _night ? _nightFilter : _dayFilter,
-                child: PdfViewer.file(
-                  _lib.pathOf(_book),
-                  controller: _controller,
-                  // Lu une seule fois à l'ouverture : ne pas y mettre _page,
-                  // sinon le lecteur serait reconfiguré à chaque page.
-                  initialPageNumber:
-                      math.max(1, widget.initialPage ?? _book.lastPage),
-                  params: PdfViewerParams(
-                    backgroundColor: const Color(0xFFE0E0E0),
-                    onViewerReady: _onViewerReady,
-                    onPageChanged: _onPageChanged,
-                    pagePaintCallbacks: [
-                      _paintAnnotations,
-                      _searcher.pageTextMatchPaintCallback,
-                    ],
-                    textSelectionParams: PdfTextSelectionParams(
-                      onTextSelectionChange: (selection) => _update(
-                          () => _hasSelection = selection.hasSelectedText),
-                    ),
-                    viewerOverlayBuilder: (context, size, handleLinkTap) => [
-                      PdfViewerScrollThumb(
-                        controller: _controller,
-                        orientation: ScrollbarOrientation.right,
-                        thumbSize: const Size(44, 28),
-                        thumbBuilder:
-                            (context, thumbSize, pageNumber, controller) =>
-                                DecoratedBox(
-                          decoration: const BoxDecoration(
-                            color: Color(0xDD000000),
-                            borderRadius: BorderRadius.horizontal(
-                                left: Radius.circular(14)),
-                          ),
-                          child: Center(
-                            child: Text(
-                              pageNumber.toString(),
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                child: _buildViewer(),
               ),
             ),
             if (_hasSelection)

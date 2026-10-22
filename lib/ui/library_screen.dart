@@ -1,5 +1,6 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../data/book.dart';
 import '../data/category.dart';
@@ -20,7 +21,8 @@ class LibraryScreen extends StatefulWidget {
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
 
-class _LibraryScreenState extends State<LibraryScreen> {
+class _LibraryScreenState extends State<LibraryScreen>
+    with WidgetsBindingObserver {
   final _searchController = TextEditingController();
   List<Book> _books = const [];
   List<BookCategory> _categories = const [];
@@ -39,12 +41,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _lib.addListener(_onLibraryChanged);
     _init();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _lib.removeListener(_onLibraryChanged);
     _searchController.dispose();
     super.dispose();
@@ -54,11 +58,77 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _reload();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Retour dans l'appli (après un téléchargement dans le navigateur, par
+    // exemple) : on regarde s'il y a de nouveaux PDF dans Téléchargements.
+    if (state == AppLifecycleState.resumed) _checkDownloads();
+  }
+
+  bool _checkingDownloads = false;
+
+  /// Importe les nouveaux PDF du dossier Téléchargements, si l'option est
+  /// activée dans les Réglages et que l'accès aux fichiers est autorisé.
+  Future<void> _checkDownloads() async {
+    if (_checkingDownloads || !await _lib.watchDownloadsEnabled()) return;
+    if (!await Permission.manageExternalStorage.isGranted) return;
+    _checkingDownloads = true;
+    try {
+      final report = await _lib.importFromDownloads();
+      if (!mounted || (report.added == 0 && report.failed.isEmpty)) return;
+      _offerUpload(
+          'Téléchargements : ${report.summary}', report.addedIds);
+    } finally {
+      _checkingDownloads = false;
+    }
+  }
+
+  /// Message après un import, avec un bouton pour envoyer aussi les
+  /// nouveaux livres sur le serveur (ils restent d'abord sur le téléphone).
+  void _offerUpload(String message, List<String> ids) {
+    final canUpload = _lib.hasServer && ids.isNotEmpty;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(message),
+        duration: Duration(seconds: canUpload ? 8 : 4),
+        action: canUpload
+            ? SnackBarAction(
+                label: 'Envoyer sur le serveur',
+                onPressed: () => _uploadIds(ids),
+              )
+            : null,
+      ));
+  }
+
+  Future<void> _uploadIds(List<String> ids) async {
+    if (!mounted) return;
+    try {
+      await runWithProgress<void>(context, 'Envoi sur le serveur',
+          (progress, detail) async {
+        for (var i = 0; i < ids.length; i++) {
+          final book = await _lib.db.book(ids[i]);
+          if (book == null || book.onServer || !book.onDevice) continue;
+          detail.value = '${i + 1} / ${ids.length} · ${book.title}';
+          await _lib.uploadBook(book, onProgress: (fraction) {
+            progress.value = (i + fraction) / ids.length;
+          });
+        }
+      });
+      if (mounted) showSnack(context, 'Envoyé sur le serveur');
+    } on ServerException catch (e) {
+      if (mounted) showSnack(context, e.message);
+    }
+  }
+
+  Future<void> _uploadOne(Book book) => _uploadIds([book.id]);
+
   Future<void> _init() async {
     _sort = BookSort.fromKey(await _lib.db.getSetting('tri'));
     _reversed = await _lib.db.getSetting('tri_inverse') == '1';
     _filter = LibraryFilter.fromKey(await _lib.db.getSetting('filtre'));
     await _reload();
+    await _checkDownloads();
     if (_lib.hasServer) await _sync(silent: true);
   }
 
@@ -239,7 +309,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final where = category != null && ids.isNotEmpty
         ? ' · rangé${ids.length > 1 ? 's' : ''} dans « ${category.name} »'
         : '';
-    showSnack(context, '${report.summary}$where');
+    _offerUpload('${report.summary}$where', report.addedIds);
     await _reload();
   }
 
@@ -320,7 +390,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (server && book.onDevice && !book.onServer)
         ('upload', Icons.cloud_upload_outlined, 'Envoyer sur le serveur'),
       if (server && !book.onDevice && book.onServer)
-        ('download', Icons.download_outlined, 'Télécharger sur le téléphone'),
+        ('download', Icons.download_outlined,
+            'Télécharger sur le téléphone (lecture hors connexion)'),
       if (book.onDevice && book.onServer)
         ('free', Icons.phonelink_erase,
             'Libérer de la place (le garder seulement sur le serveur)'),
@@ -721,7 +792,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _buildSortBar(books),
         Expanded(
           child: RefreshIndicator(
-            onRefresh: () => _lib.hasServer ? _sync() : _reload(),
+            onRefresh: () async {
+              await _checkDownloads();
+              await (_lib.hasServer ? _sync() : _reload());
+            },
             child: books.isEmpty ? _buildNoResult() : _buildList(books),
           ),
         ),
@@ -762,6 +836,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           categoryNames: _categoryNamesOf(book),
           annotationCount: _annotationCounts[book.id] ?? 0,
           serverConfigured: _lib.hasServer,
+          onUpload: () => _uploadOne(book),
           onTap: () => openBook(context, _lib, book),
           onLongPress: () => _showBookMenu(book),
         );

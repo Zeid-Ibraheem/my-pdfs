@@ -79,6 +79,11 @@ class Library extends ChangeNotifier {
   static const _kAutoUpload = 'envoi_auto';
   static const _kLastBackup = 'derniere_sauvegarde';
   static const _kCacheGb = 'cache_go';
+  static const _kWatchDownloads = 'telechargements_auto';
+  static const _kDeleteDownloads = 'telechargements_supprimer';
+
+  /// Dossier Téléchargements du profil Android en cours.
+  static const downloadsPath = '/storage/self/primary/Download';
 
   static Future<Library> open() async {
     final docs = await getApplicationDocumentsDirectory();
@@ -337,8 +342,10 @@ class Library extends ChangeNotifier {
   Future<void> setAutoBackup(bool enabled) =>
       _db.setSetting(_kAutoBackup, enabled ? '1' : '0');
 
+  /// Désactivé par défaut : un livre importé reste sur le téléphone tant
+  /// qu'on ne demande pas de l'envoyer sur le serveur.
   Future<bool> autoUploadEnabled() async =>
-      await _db.getSetting(_kAutoUpload) != '0';
+      await _db.getSetting(_kAutoUpload) == '1';
 
   Future<void> setAutoUpload(bool enabled) =>
       _db.setSetting(_kAutoUpload, enabled ? '1' : '0');
@@ -425,7 +432,7 @@ class Library extends ChangeNotifier {
       final file = files[i];
       onProgress?.call(i, files.length, file.name);
       try {
-        final outcome = await _importOne(file);
+        final outcome = await _importStream(file.name, file.readAsByteStream());
         switch (outcome.status) {
           case _Status.added:
             report.addedIds.add(outcome.id!);
@@ -466,7 +473,7 @@ class Library extends ChangeNotifier {
 
   /// Copie le fichier dans la bibliothèque en calculant son empreinte
   /// au passage (une seule lecture du fichier, même pour 200 Mo).
-  Future<_Outcome> _importOne(PlatformFile source) async {
+  Future<_Outcome> _importStream(String name, Stream<List<int>> bytes) async {
     final tmp = File(p.join(
         booksDir, 'import-${DateTime.now().microsecondsSinceEpoch}.part'));
     final hashInput = StreamController<List<int>>();
@@ -476,7 +483,7 @@ class Library extends ChangeNotifier {
 
     var copied = false;
     try {
-      await for (final chunk in source.readAsByteStream()) {
+      await for (final chunk in bytes) {
         if (header.length < 1024) {
           header.addAll(chunk.take(1024 - header.length));
         }
@@ -515,7 +522,7 @@ class Library extends ChangeNotifier {
 
     await _db.insertBook(Book(
       id: id,
-      title: cleanTitle(source.name),
+      title: cleanTitle(name),
       fileName: fileName,
       sizeBytes: await dest.length(),
       pageCount: null,
@@ -524,6 +531,89 @@ class Library extends ChangeNotifier {
       lastOpenedAt: null,
     ));
     return _Outcome(_Status.added, id);
+  }
+
+  // --------------------------------------------- Dossier Téléchargements
+
+  Future<bool> watchDownloadsEnabled() async =>
+      await _db.getSetting(_kWatchDownloads) == '1';
+
+  Future<void> setWatchDownloads(bool enabled) =>
+      _db.setSetting(_kWatchDownloads, enabled ? '1' : '0');
+
+  Future<bool> deleteDownloadsAfterImport() async =>
+      await _db.getSetting(_kDeleteDownloads) == '1';
+
+  Future<void> setDeleteDownloadsAfterImport(bool enabled) =>
+      _db.setSetting(_kDeleteDownloads, enabled ? '1' : '0');
+
+  /// Marque comme déjà vus tous les PDF actuellement dans Téléchargements,
+  /// pour que l'activation de l'option n'importe pas tout l'historique.
+  Future<int> ignoreCurrentDownloads() async {
+    final files = await _pendingDownloads();
+    for (final (file, signature) in files) {
+      await _db.markDownloadSeen(file.path, signature);
+    }
+    return files.length;
+  }
+
+  /// Nombre de PDF de Téléchargements pas encore importés.
+  Future<int> pendingDownloadsCount() async =>
+      (await _pendingDownloads()).length;
+
+  /// PDF du dossier Téléchargements pas encore importés.
+  Future<List<(File, String)>> _pendingDownloads() async {
+    final dir = Directory(downloadsPath);
+    if (!await dir.exists()) return const [];
+    final seen = await _db.seenDownloads();
+    final found = <(File, String)>[];
+    final now = DateTime.now();
+    final entries = dir
+        .list(recursive: true, followLinks: false)
+        .handleError((Object _) {}); // sous-dossier illisible : on l'ignore
+    await for (final entry in entries) {
+      if (entry is! File) continue;
+      final name = p.basename(entry.path);
+      if (name.startsWith('.') || !name.toLowerCase().endsWith('.pdf')) {
+        continue;
+      }
+      final stat = await entry.stat();
+      // Fichier modifié il y a moins de 5 s : téléchargement peut-être en cours.
+      if (now.difference(stat.modified) < const Duration(seconds: 5)) continue;
+      final signature = '${stat.size}:${stat.modified.millisecondsSinceEpoch}';
+      if (seen[entry.path] == signature) continue;
+      found.add((entry, signature));
+    }
+    return found;
+  }
+
+  /// Importe les nouveaux PDF du dossier Téléchargements (sur le téléphone
+  /// seulement). Nécessite l'accès à tous les fichiers.
+  Future<ImportReport> importFromDownloads() async {
+    final report = ImportReport();
+    final deleteAfter = await deleteDownloadsAfterImport();
+    for (final (file, signature) in await _pendingDownloads()) {
+      try {
+        final outcome =
+            await _importStream(p.basename(file.path), file.openRead());
+        switch (outcome.status) {
+          case _Status.added:
+            report.addedIds.add(outcome.id!);
+          case _Status.duplicate:
+            report.duplicateIds.add(outcome.id!);
+          case _Status.notPdf:
+            report.failed.add(p.basename(file.path));
+        }
+        await _db.markDownloadSeen(file.path, signature);
+        if (deleteAfter && outcome.status != _Status.notPdf) {
+          await _deleteQuietly(file);
+        }
+      } catch (_) {
+        report.failed.add(p.basename(file.path));
+      }
+    }
+    if (report.added > 0 || report.duplicates > 0) notifyListeners();
+    return report;
   }
 
   static Future<void> _deleteQuietly(File file) async {

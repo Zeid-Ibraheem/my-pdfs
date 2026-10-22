@@ -4,7 +4,6 @@ import 'package:material_ui/material_ui.dart';
 
 import '../data/book.dart';
 import '../data/library.dart';
-import '../data/server_api.dart';
 import 'reader_screen.dart';
 
 /// Petit message en bas de l'écran.
@@ -96,14 +95,14 @@ Future<bool> confirmDialog(
   return confirmed == true;
 }
 
-/// Ouvre un livre. S'il n'est que sur le serveur, il est d'abord téléchargé.
+/// Ouvre un livre. S'il n'est que sur le serveur, il est lu directement
+/// depuis le serveur, sans être enregistré sur le téléphone.
 Future<void> openBook(
   BuildContext context,
   Library library,
   Book book, {
   int? page,
 }) async {
-  var target = book;
   if (!book.onDevice) {
     if (!book.onServer) {
       showSnack(context, 'Fichier introuvable, ni sur le téléphone ni sur le serveur');
@@ -114,23 +113,10 @@ Future<void> openBook(
           'Ce livre est sur ton serveur : renseigne-le dans l’onglet Réglages');
       return;
     }
-    try {
-      await runWithProgress<void>(
-        context,
-        'Téléchargement depuis le serveur',
-        (progress, detail) => library.downloadBook(book,
-            onProgress: (fraction) => progress.value = fraction),
-      );
-    } on ServerException catch (e) {
-      if (context.mounted) showSnack(context, e.message);
-      return;
-    }
-    target = await library.db.book(book.id) ?? book;
   }
-  if (!context.mounted) return;
   await Navigator.of(context).push(
     MaterialPageRoute<void>(
-      builder: (_) => ReaderScreen(library: library, book: target, initialPage: page),
+      builder: (_) => ReaderScreen(library: library, book: book, initialPage: page),
     ),
   );
   library.refresh(); // progression, notes… ont pu changer

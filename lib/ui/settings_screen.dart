@@ -1,11 +1,12 @@
 import 'package:material_ui/material_ui.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../data/library.dart';
 import '../data/server_api.dart';
 import '../util/text.dart';
 import 'common.dart';
 
-const appVersion = '0.3.0';
+const appVersion = '0.4.0';
 
 /// Onglet Réglages : connexion au serveur, place sur le téléphone,
 /// sauvegarde des notes et de la progression.
@@ -26,7 +27,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   ServerUsage? _usage;
   String? _serverError;
   bool _autoBackup = true;
-  bool _autoUpload = true;
+  bool _autoUpload = false;
+  bool _watchDownloads = false;
+  bool _deleteDownloads = false;
   int _cacheGb = 5;
   DateTime? _lastBackup;
   int _localOnlyBytes = 0;
@@ -60,6 +63,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _load() async {
     final autoBackup = await _lib.autoBackupEnabled();
     final autoUpload = await _lib.autoUploadEnabled();
+    final watchDownloads = await _lib.watchDownloadsEnabled() &&
+        await Permission.manageExternalStorage.isGranted;
+    final deleteDownloads = await _lib.deleteDownloadsAfterImport();
     final cacheGb = await _lib.cacheLimitGb();
     final lastBackup = await _lib.lastBackup();
     final (localOnly, cached) = await _lib.deviceUsage();
@@ -69,6 +75,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       _autoBackup = autoBackup;
       _autoUpload = autoUpload;
+      _watchDownloads = watchDownloads;
+      _deleteDownloads = deleteDownloads;
       _cacheGb = cacheGb;
       _lastBackup = lastBackup;
       _localOnlyBytes = localOnly;
@@ -175,6 +183,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   : '$sent envoyé${sent > 1 ? 's' : ''}, $failed en échec');
         }
       });
+
+  /// Active l'import automatique depuis Téléchargements. Android demande
+  /// d'abord l'« accès à tous les fichiers » (écran des paramètres).
+  Future<void> _toggleWatchDownloads(bool enable) async {
+    if (!enable) {
+      setState(() => _watchDownloads = false);
+      await _lib.setWatchDownloads(false);
+      return;
+    }
+    final status = await Permission.manageExternalStorage.request();
+    if (!mounted) return;
+    if (!status.isGranted) {
+      showSnack(context,
+          'Autorise « Accès à tous les fichiers » pour My PDFs, puis réessaie');
+      return;
+    }
+    final pending = await _lib.pendingDownloadsCount();
+    if (!mounted) return;
+    var importExisting = false;
+    if (pending > 0) {
+      importExisting = await confirmDialog(
+        context,
+        title: '$pending PDF déjà dans Téléchargements',
+        message: 'Les importer maintenant ? Sinon, seuls les prochains PDF '
+            'téléchargés seront importés.',
+        action: 'Importer',
+      );
+    }
+    if (!importExisting) await _lib.ignoreCurrentDownloads();
+    await _lib.setWatchDownloads(true);
+    if (!mounted) return;
+    setState(() => _watchDownloads = true);
+    if (importExisting) {
+      final report = await runWithProgress(
+          context, 'Import depuis Téléchargements',
+          (progress, detail) => _lib.importFromDownloads());
+      if (mounted) showSnack(context, report.summary);
+    }
+  }
 
   Future<void> _backupNow() => _run(() async {
         await _lib.backupNow();
@@ -332,11 +379,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
           SwitchListTile(
             secondary: const Icon(Icons.upload_file_outlined),
             title: const Text('Envoyer automatiquement les nouveaux imports'),
+            subtitle: const Text(
+                'Désactivé : les livres restent sur le téléphone ; le bouton '
+                'nuage de chaque livre les envoie quand tu veux'),
             value: _autoUpload,
             onChanged: connected
                 ? (value) async {
                     setState(() => _autoUpload = value);
                     await _lib.setAutoUpload(value);
+                  }
+                : null,
+          ),
+
+          const _Header('Dossier Téléchargements'),
+          SwitchListTile(
+            secondary: const Icon(Icons.download_for_offline_outlined),
+            title: const Text('Importer automatiquement les nouveaux PDF'),
+            subtitle: const Text(
+                'Chaque PDF téléchargé (navigateur, mails…) est ajouté à la '
+                'bibliothèque à l’ouverture de l’appli, sur le téléphone '
+                'seulement'),
+            value: _watchDownloads,
+            onChanged: _busy ? null : _toggleWatchDownloads,
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.auto_delete_outlined),
+            title: const Text('Puis les retirer de Téléchargements'),
+            subtitle: const Text(
+                'Le PDF n’existe alors plus qu’en un exemplaire, dans l’appli'),
+            value: _deleteDownloads,
+            onChanged: _watchDownloads
+                ? (value) async {
+                    setState(() => _deleteDownloads = value);
+                    await _lib.setDeleteDownloadsAfterImport(value);
                   }
                 : null,
           ),

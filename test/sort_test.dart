@@ -40,6 +40,14 @@ void main() {
     expect(titles(sortBooks([a, b, c], BookSort.added)), ['avion', 'Zèbre', 'Été']);
   });
 
+  test('progression : page 1 = 0 %, dernière page = 100 %', () {
+    expect(book('a', pages: 2, last: 1).progress, 0.0);
+    expect(book('b', pages: 2, last: 2).progress, 1.0);
+    expect(book('c', pages: 1, last: 1).progress, 1.0);
+    expect(book('d', pages: 101, last: 51).progress, 0.5);
+    expect(book('e').progress, isNull);
+  });
+
   test('adresse du serveur normalisée', () {
     expect(Library.normalizeServerUrl(' 100.1.2.3:8765/ '), 'http://100.1.2.3:8765');
     expect(Library.normalizeServerUrl('http://srv.ts.net:8765'), 'http://srv.ts.net:8765');

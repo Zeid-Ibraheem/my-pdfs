@@ -18,6 +18,7 @@ import 'category.dart';
 /// 1. livres, marque-pages, réglages
 /// 2. catégories et annotations (surlignages, notes)
 /// 3. emplacement des livres (téléphone / serveur) et épinglage
+/// 4. fichiers déjà vus dans le dossier Téléchargements
 class AppDatabase {
   AppDatabase._(this._db, this.path);
 
@@ -35,7 +36,7 @@ class AppDatabase {
     final path = await defaultPath();
     final db = await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
       },
@@ -43,12 +44,14 @@ class AppDatabase {
         await _createV1(db);
         await _createV2(db);
         await _createV3(db);
+        await _createV4(db);
       },
       // Mise à jour d'une appli déjà installée : on ajoute ce qui manque
       // sans toucher aux livres, marque-pages et annotations existants.
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) await _createV2(db);
         if (oldVersion < 3) await _createV3(db);
+        if (oldVersion < 4) await _createV4(db);
       },
     );
     return AppDatabase._(db, path);
@@ -93,6 +96,15 @@ class AppDatabase {
       CREATE TABLE settings (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
+      )
+    ''');
+  }
+
+  static Future<void> _createV4(Database db) async {
+    await db.execute('''
+      CREATE TABLE seen_downloads (
+        path      TEXT PRIMARY KEY,
+        signature TEXT NOT NULL
       )
     ''');
   }
@@ -355,6 +367,21 @@ class AppDatabase {
     return {
       for (final row in rows) row['book_id'] as String: row['n'] as int,
     };
+  }
+
+  // ------------------------------------------------- Dossier Téléchargements
+
+  /// Fichiers déjà traités : chemin → « taille:date de modification ».
+  Future<Map<String, String>> seenDownloads() async {
+    final rows = await _db.query('seen_downloads');
+    return {
+      for (final row in rows) row['path'] as String: row['signature'] as String,
+    };
+  }
+
+  Future<void> markDownloadSeen(String path, String signature) async {
+    await _db.insert('seen_downloads', {'path': path, 'signature': signature},
+        conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   // -------------------------------------------------------------- Réglages
