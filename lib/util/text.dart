@@ -59,3 +59,10 @@ bool looksLikePdf(List<int> header) {
   }
   return false;
 }
+
+/// Date et heure lisibles : « 22/10/2026 à 14:05 ».
+String formatDateTime(DateTime date) {
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${two(date.day)}/${two(date.month)}/${date.year} '
+      'à ${two(date.hour)}:${two(date.minute)}';
+}

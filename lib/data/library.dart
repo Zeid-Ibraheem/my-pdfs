@@ -3,20 +3,30 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../util/text.dart';
 import 'book.dart';
 import 'database.dart';
+import 'server_api.dart';
 
 typedef ImportProgress = void Function(int index, int total, String name);
 
 /// Résultat d'un import de plusieurs fichiers.
 class ImportReport {
-  int added = 0;
-  int duplicates = 0;
+  int get added => addedIds.length;
+  int get duplicates => duplicateIds.length;
   final List<String> failed = [];
+
+  /// Empreintes des livres ajoutés ou déjà présents
+  /// (pour les ranger dans la catégorie affichée pendant l'import).
+  final List<String> addedIds = [];
+  final List<String> duplicateIds = [];
+
+  /// Livres envoyés automatiquement sur le serveur.
+  int uploaded = 0;
 
   String get summary {
     final parts = <String>[];
@@ -27,32 +37,62 @@ class ImportReport {
     if (failed.isNotEmpty) {
       parts.add('${failed.length} en échec (${failed.join(', ')})');
     }
+    if (uploaded > 0) {
+      parts.add('$uploaded envoyé${uploaded > 1 ? 's' : ''} sur le serveur');
+    }
     return parts.isEmpty ? 'Rien importé' : parts.join(' · ');
   }
 }
 
-enum _Outcome { added, duplicate, notPdf }
+enum _Status { added, duplicate, notPdf }
 
-/// Gère les fichiers PDF : import, chemin sur le disque, suppression.
+class _Outcome {
+  const _Outcome(this.status, [this.id]);
+
+  final _Status status;
+  final String? id;
+}
+
+/// Gère les livres : fichiers sur le téléphone, serveur, sauvegardes.
 ///
 /// Les PDF sont copiés dans le dossier privé de l'appli, sous le nom
 /// « <empreinte SHA-256>.pdf ». Le fichier d'origine n'est jamais modifié.
-class Library {
-  Library._(this.db, this.booksDir);
+/// Les écrans écoutent cet objet : il les prévient à chaque changement.
+class Library extends ChangeNotifier {
+  Library._(this._db, this.booksDir);
 
-  final AppDatabase db;
+  AppDatabase _db;
   final String booksDir;
+  ServerApi? _api;
+  String? _serverUrl;
+  String? _serverToken;
+
+  AppDatabase get db => _db;
+  ServerApi? get api => _api;
+  bool get hasServer => _api != null;
+  String? get serverUrl => _serverUrl;
+  String? get serverToken => _serverToken;
+
+  static const _kUrl = 'serveur_url';
+  static const _kToken = 'serveur_jeton';
+  static const _kAutoBackup = 'sauvegarde_auto';
+  static const _kAutoUpload = 'envoi_auto';
+  static const _kLastBackup = 'derniere_sauvegarde';
+  static const _kCacheGb = 'cache_go';
 
   static Future<Library> open() async {
     final docs = await getApplicationDocumentsDirectory();
     final dir = Directory(p.join(docs.path, 'livres'));
     await dir.create(recursive: true);
-    await _cleanPartialImports(dir);
-    return Library._(await AppDatabase.open(), dir.path);
+    await _cleanPartialFiles(dir);
+    final library = Library._(await AppDatabase.open(), dir.path);
+    await library._loadServerConfig();
+    await library._reconcileFiles();
+    return library;
   }
 
-  /// Supprime les copies interrompues (appli fermée pendant un import).
-  static Future<void> _cleanPartialImports(Directory dir) async {
+  /// Supprime les copies interrompues (appli fermée pendant un transfert).
+  static Future<void> _cleanPartialFiles(Directory dir) async {
     await for (final entry in dir.list()) {
       if (entry is File && entry.path.endsWith('.part')) {
         await _deleteQuietly(entry);
@@ -61,6 +101,320 @@ class Library {
   }
 
   String pathOf(Book book) => p.join(booksDir, book.fileName);
+
+  /// Prévient les écrans qu'il faut se rafraîchir (après une lecture, par ex.).
+  void refresh() => notifyListeners();
+
+  /// Remet « sur le téléphone » en accord avec les fichiers réellement
+  /// présents (utile après une restauration ou un fichier effacé).
+  Future<void> _reconcileFiles() async {
+    for (final book in await _db.books()) {
+      final exists = await File(pathOf(book)).exists();
+      if (exists != book.onDevice) await _db.setOnDevice(book.id, exists);
+    }
+  }
+
+  ServerApi _requireApi() {
+    final api = _api;
+    if (api == null) {
+      throw const ServerException(
+          'Serveur non configuré : renseigne-le dans l’onglet Réglages');
+    }
+    return api;
+  }
+
+  // ------------------------------------------------------------- Serveur
+
+  Future<void> _loadServerConfig() async {
+    _serverUrl = await _db.getSetting(_kUrl);
+    _serverToken = await _db.getSetting(_kToken);
+    final url = _serverUrl, token = _serverToken;
+    _api = (url != null && url.isNotEmpty && token != null && token.isNotEmpty)
+        ? ServerApi(baseUrl: url, token: token)
+        : null;
+  }
+
+  /// « 100.1.2.3:8765/ » → « http://100.1.2.3:8765 ».
+  static String normalizeServerUrl(String input) {
+    var url = input.trim();
+    while (url.endsWith('/')) {
+      url = url.substring(0, url.length - 1);
+    }
+    if (url.isNotEmpty && !url.contains('://')) url = 'http://$url';
+    return url;
+  }
+
+  /// Teste puis enregistre l'adresse et le jeton. Lève ServerException
+  /// si le serveur ne répond pas ou refuse le jeton.
+  Future<ServerUsage> saveServerConfig(String url, String token) async {
+    final cleanUrl = normalizeServerUrl(url);
+    final cleanToken = token.trim();
+    final api = ServerApi(baseUrl: cleanUrl, token: cleanToken);
+    final usage = await api.check();
+    await _db.setSetting(_kUrl, cleanUrl);
+    await _db.setSetting(_kToken, cleanToken);
+    await _loadServerConfig();
+    notifyListeners();
+    return usage;
+  }
+
+  Future<void> forgetServer() async {
+    await _db.setSetting(_kUrl, '');
+    await _db.setSetting(_kToken, '');
+    await _loadServerConfig();
+    notifyListeners();
+  }
+
+  /// Ajoute à la bibliothèque les livres présents sur le serveur et met à
+  /// jour leur emplacement. Renvoie le nombre de nouveaux livres.
+  Future<int> syncWithServer() async {
+    final api = _requireApi();
+    final remote = await api.books();
+    final local = {for (final b in await _db.books()) b.id: b};
+    var added = 0;
+    for (final r in remote) {
+      final existing = local[r.id];
+      if (existing == null) {
+        await _db.insertBook(Book(
+          id: r.id,
+          title: r.title,
+          fileName: '${r.id}.pdf',
+          sizeBytes: r.sizeBytes,
+          pageCount: r.pageCount,
+          lastPage: 1,
+          addedAt: r.addedAt,
+          lastOpenedAt: null,
+          onDevice: false,
+          onServer: true,
+        ));
+        added++;
+      } else if (existing.pageCount == null && r.pageCount != null) {
+        await _db.setPageCount(r.id, r.pageCount!);
+      }
+    }
+    await _db.applyServerIds({for (final r in remote) r.id});
+    notifyListeners();
+    return added;
+  }
+
+  Future<void> uploadBook(Book book, {ProgressCallback? onProgress}) async {
+    final api = _requireApi();
+    await api.upload(book.id, book.title, File(pathOf(book)),
+        onProgress: onProgress);
+    await _db.setOnServer(book.id, true);
+    notifyListeners();
+  }
+
+  /// Envoie sur le serveur tous les livres qui ne sont que sur le téléphone.
+  Future<(int, int)> uploadAll({ImportProgress? onProgress}) async {
+    _requireApi();
+    final pending =
+        (await _db.books()).where((b) => b.onDevice && !b.onServer).toList();
+    var sent = 0;
+    var failed = 0;
+    for (var i = 0; i < pending.length; i++) {
+      onProgress?.call(i, pending.length, pending[i].title);
+      try {
+        await uploadBook(pending[i]);
+        sent++;
+      } on ServerException {
+        failed++;
+      }
+    }
+    return (sent, failed);
+  }
+
+  /// Télécharge sur le téléphone un livre qui n'est que sur le serveur.
+  Future<void> downloadBook(Book book, {ProgressCallback? onProgress}) async {
+    final api = _requireApi();
+    final tmp = File(p.join(
+        booksDir, 'dl-${DateTime.now().microsecondsSinceEpoch}.part'));
+    try {
+      await api.download(book.id, tmp,
+          expectedSize: book.sizeBytes, onProgress: onProgress);
+      await tmp.rename(pathOf(book));
+    } finally {
+      await _deleteQuietly(tmp);
+    }
+    await _db.setOnDevice(book.id, true);
+    await enforceCacheLimit(keepId: book.id);
+    notifyListeners();
+  }
+
+  /// Retire le fichier du téléphone ; il reste sur le serveur.
+  Future<void> freeSpace(Book book) async {
+    if (!book.onServer) return;
+    await _deleteQuietly(File(pathOf(book)));
+    await _db.setOnDevice(book.id, false);
+    notifyListeners();
+  }
+
+  Future<void> setPinned(Book book, bool pinned) async {
+    await _db.setPinned(book.id, pinned);
+    notifyListeners();
+  }
+
+  Future<void> renameBook(Book book, String title) async {
+    await _db.renameBook(book.id, title);
+    if (book.onServer && hasServer) {
+      try {
+        await _api!.rename(book.id, title);
+      } on ServerException {
+        // Le titre du serveur ne sert qu'à l'affichage : pas bloquant.
+      }
+    }
+    notifyListeners();
+  }
+
+  /// Supprime le livre, ses marque-pages et ses annotations, sur le
+  /// téléphone et (si [fromServer]) sur le serveur.
+  Future<void> deleteBook(Book book, {bool fromServer = true}) async {
+    if (fromServer && book.onServer) {
+      await _requireApi().delete(book.id);
+    }
+    await _db.deleteBook(book.id);
+    await _deleteQuietly(File(pathOf(book)));
+    notifyListeners();
+  }
+
+  // ---------------------------------------------- Place sur le téléphone
+
+  /// Limite de place pour les livres du serveur gardés sur le téléphone.
+  Future<int> cacheLimitGb() async =>
+      int.tryParse(await _db.getSetting(_kCacheGb) ?? '') ?? 5;
+
+  Future<void> setCacheLimitGb(int gb) async {
+    await _db.setSetting(_kCacheGb, '$gb');
+    await enforceCacheLimit();
+    notifyListeners();
+  }
+
+  /// Si les livres du serveur gardés sur le téléphone dépassent la limite,
+  /// retire les moins récemment lus (jamais les livres épinglés, ni ceux
+  /// qui ne sont que sur le téléphone). Renvoie le nombre de livres retirés.
+  Future<int> enforceCacheLimit({String? keepId}) async {
+    final limit = (await cacheLimitGb()) * 1024 * 1024 * 1024;
+    final cached =
+        (await _db.books()).where((b) => b.onDevice && b.onServer).toList();
+    var total = cached.fold<int>(0, (sum, b) => sum + b.sizeBytes);
+    if (total <= limit) return 0;
+    final candidates = cached
+        .where((b) => !b.pinned && b.id != keepId)
+        .toList()
+      ..sort((a, b) =>
+          (a.lastOpenedAt ?? a.addedAt).compareTo(b.lastOpenedAt ?? b.addedAt));
+    var removed = 0;
+    for (final book in candidates) {
+      if (total <= limit) break;
+      await _deleteQuietly(File(pathOf(book)));
+      await _db.setOnDevice(book.id, false);
+      total -= book.sizeBytes;
+      removed++;
+    }
+    return removed;
+  }
+
+  /// Place utilisée sur le téléphone : (livres seulement ici, copies du serveur).
+  Future<(int, int)> deviceUsage() async {
+    var localOnly = 0;
+    var cached = 0;
+    for (final b in await _db.books()) {
+      if (!b.onDevice) continue;
+      if (b.onServer) {
+        cached += b.sizeBytes;
+      } else {
+        localOnly += b.sizeBytes;
+      }
+    }
+    return (localOnly, cached);
+  }
+
+  // ---------------------------------------------------------- Sauvegarde
+
+  Future<bool> autoBackupEnabled() async =>
+      await _db.getSetting(_kAutoBackup) != '0';
+
+  Future<void> setAutoBackup(bool enabled) =>
+      _db.setSetting(_kAutoBackup, enabled ? '1' : '0');
+
+  Future<bool> autoUploadEnabled() async =>
+      await _db.getSetting(_kAutoUpload) != '0';
+
+  Future<void> setAutoUpload(bool enabled) =>
+      _db.setSetting(_kAutoUpload, enabled ? '1' : '0');
+
+  Future<DateTime?> lastBackup() async {
+    final ms = int.tryParse(await _db.getSetting(_kLastBackup) ?? '');
+    return ms == null ? null : DateTime.fromMillisecondsSinceEpoch(ms);
+  }
+
+  /// Envoie une copie de la base (catégories, notes, progression…).
+  Future<void> backupNow() async {
+    final api = _requireApi();
+    final tmpDir = await getTemporaryDirectory();
+    final copy = File(p.join(tmpDir.path, 'my_pdfs-sauvegarde.db'));
+    await _db.exportTo(copy.path);
+    try {
+      await api.uploadBackup(copy);
+    } finally {
+      await _deleteQuietly(copy);
+    }
+    await _db.setSetting(
+        _kLastBackup, '${DateTime.now().millisecondsSinceEpoch}');
+  }
+
+  /// Sauvegarde silencieuse après une séance de lecture.
+  Future<void> autoBackup() async {
+    if (!hasServer || !await autoBackupEnabled()) return;
+    try {
+      await backupNow();
+    } on ServerException {
+      // Serveur injoignable : on réessaiera après la prochaine lecture.
+    }
+  }
+
+  /// Remplace la base du téléphone par la dernière sauvegarde du serveur.
+  /// Les PDF absents du téléphone seront retéléchargés à l'ouverture.
+  Future<void> restoreLatestBackup() async {
+    final api = _requireApi();
+    final tmpDir = await getTemporaryDirectory();
+    final download = File(p.join(tmpDir.path, 'restauration.db'));
+    await api.downloadLatestBackup(download);
+    final header = await download
+        .openRead(0, 15)
+        .fold<List<int>>(<int>[], (bytes, chunk) => bytes..addAll(chunk));
+    if (String.fromCharCodes(header) != 'SQLite format 3') {
+      await _deleteQuietly(download);
+      throw const ServerException('La sauvegarde reçue est invalide');
+    }
+
+    final url = _serverUrl;
+    final token = _serverToken;
+    final path = _db.path;
+    await _db.close();
+    await download.copy(path);
+    await _deleteQuietly(download);
+    for (final suffix in ['-wal', '-shm', '-journal']) {
+      await _deleteQuietly(File('$path$suffix'));
+    }
+    _db = await AppDatabase.open();
+    // On garde la connexion actuelle au serveur, même si la sauvegarde
+    // contenait une autre adresse.
+    if (url != null && token != null) {
+      await _db.setSetting(_kUrl, url);
+      await _db.setSetting(_kToken, token);
+    }
+    await _loadServerConfig();
+    await _reconcileFiles();
+    try {
+      await syncWithServer();
+    } on ServerException {
+      // Pas grave : la synchro se refera au prochain rafraîchissement.
+    }
+    notifyListeners();
+  }
+
+  // -------------------------------------------------------------- Import
 
   Future<ImportReport> importFiles(
     List<PlatformFile> files, {
@@ -71,12 +425,13 @@ class Library {
       final file = files[i];
       onProgress?.call(i, files.length, file.name);
       try {
-        switch (await _importOne(file)) {
-          case _Outcome.added:
-            report.added++;
-          case _Outcome.duplicate:
-            report.duplicates++;
-          case _Outcome.notPdf:
+        final outcome = await _importOne(file);
+        switch (outcome.status) {
+          case _Status.added:
+            report.addedIds.add(outcome.id!);
+          case _Status.duplicate:
+            report.duplicateIds.add(outcome.id!);
+          case _Status.notPdf:
             report.failed.add(file.name);
         }
       } catch (_) {
@@ -89,6 +444,23 @@ class Library {
     } catch (_) {
       // Pas grave : Android vide aussi ce cache tout seul.
     }
+
+    // Envoi automatique des nouveaux livres sur le serveur.
+    if (hasServer && report.addedIds.isNotEmpty && await autoUploadEnabled()) {
+      for (var i = 0; i < report.addedIds.length; i++) {
+        final book = await _db.book(report.addedIds[i]);
+        if (book == null) continue;
+        onProgress?.call(i, report.addedIds.length, 'Envoi : ${book.title}');
+        try {
+          await uploadBook(book);
+          report.uploaded++;
+        } on ServerException {
+          // Serveur injoignable : le livre reste sur le téléphone, on pourra
+          // l'envoyer plus tard depuis les Réglages.
+        }
+      }
+    }
+    notifyListeners();
     return report;
   }
 
@@ -122,11 +494,18 @@ class Library {
 
     if (!looksLikePdf(header)) {
       await _deleteQuietly(tmp);
-      return _Outcome.notPdf;
+      return const _Outcome(_Status.notPdf);
     }
-    if (await db.book(id) != null) {
-      await _deleteQuietly(tmp);
-      return _Outcome.duplicate;
+    final existing = await _db.book(id);
+    if (existing != null) {
+      if (existing.onDevice) {
+        await _deleteQuietly(tmp);
+      } else {
+        // Le livre n'était que sur le serveur : on garde ce fichier.
+        await tmp.rename(pathOf(existing));
+        await _db.setOnDevice(id, true);
+      }
+      return _Outcome(_Status.duplicate, id);
     }
 
     final fileName = '$id.pdf';
@@ -134,7 +513,7 @@ class Library {
     if (await dest.exists()) await dest.delete(); // reste d'une suppression ratée
     await tmp.rename(dest.path);
 
-    await db.insertBook(Book(
+    await _db.insertBook(Book(
       id: id,
       title: cleanTitle(source.name),
       fileName: fileName,
@@ -144,13 +523,7 @@ class Library {
       addedAt: DateTime.now(),
       lastOpenedAt: null,
     ));
-    return _Outcome.added;
-  }
-
-  /// Supprime le livre, son fichier et ses marque-pages.
-  Future<void> delete(Book book) async {
-    await db.deleteBook(book.id);
-    await _deleteQuietly(File(pathOf(book)));
+    return _Outcome(_Status.added, id);
   }
 
   static Future<void> _deleteQuietly(File file) async {

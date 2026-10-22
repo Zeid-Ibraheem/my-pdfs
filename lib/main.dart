@@ -1,7 +1,7 @@
 import 'package:material_ui/material_ui.dart';
 
 import 'data/library.dart';
-import 'ui/library_screen.dart';
+import 'ui/home_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -23,7 +23,7 @@ class PdfApp extends StatelessWidget {
       themeMode: ThemeMode.system,
       theme: ThemeData(colorSchemeSeed: seed, brightness: Brightness.light),
       darkTheme: ThemeData(colorSchemeSeed: seed, brightness: Brightness.dark),
-      home: LibraryScreen(library: library),
+      home: HomeScreen(library: library),
     );
   }
 }

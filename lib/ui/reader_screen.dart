@@ -6,8 +6,10 @@ import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:pdfrx/pdfrx.dart';
 
+import '../data/annotation.dart';
 import '../data/book.dart';
 import '../data/library.dart';
+import 'annotation_widgets.dart';
 
 /// Inverse les couleurs des pages (fond noir, texte blanc).
 const _nightFilter = ColorFilter.matrix(<double>[
@@ -26,15 +28,38 @@ const _dayFilter = ColorFilter.matrix(<double>[
   0, 0, 0, 1, 0, //
 ]);
 
-enum _MenuAction { bookmarks, goToPage, copyPage, night }
+/// Couleur du point qui signale une page annotée.
+const _noteDotColor = 0xFFFF9F00;
+
+/// Inverse une couleur ARGB : en mode nuit, tout l'écran est inversé,
+/// donc on peint l'inverse pour retrouver la bonne teinte à l'affichage.
+int _invert(int argb) => 0xFF000000 | (~argb & 0x00FFFFFF);
+
+enum _MenuAction { addNote, bookmarks, goToPage, copyPage, night }
+
+/// Une zone surlignée prête à peindre.
+class _Mark {
+  const _Mark(this.rect, this.color);
+
+  final PdfRect rect;
+  final int color;
+}
 
 /// Lecteur : défilement vertical continu, reprise à la dernière page,
-/// marque-pages, copie du texte.
+/// marque-pages, surlignages, notes et copie du texte.
 class ReaderScreen extends StatefulWidget {
-  const ReaderScreen({super.key, required this.library, required this.book});
+  const ReaderScreen({
+    super.key,
+    required this.library,
+    required this.book,
+    this.initialPage,
+  });
 
   final Library library;
   final Book book;
+
+  /// Page d'ouverture (résultat de recherche) ; sinon la dernière page lue.
+  final int? initialPage;
 
   @override
   State<ReaderScreen> createState() => _ReaderScreenState();
@@ -46,9 +71,18 @@ class _ReaderScreenState extends State<ReaderScreen>
   late int _page;
   int? _pageCount;
   Set<int> _bookmarks = {};
+  List<Annotation> _annotations = const [];
+  Map<int, List<_Mark>> _marks = const {};
+  Set<int> _notedPages = const {};
   bool _night = false;
   bool _hasSelection = false;
   Timer? _saveTimer;
+
+  // Recherche dans le livre (moteur de pdfrx).
+  late final PdfTextSearcher _searcher = PdfTextSearcher(_controller)
+    ..addListener(_onSearchChanged);
+  final _searchField = TextEditingController();
+  bool _searchMode = false;
 
   Book get _book => widget.book;
   Library get _lib => widget.library;
@@ -57,7 +91,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _page = math.max(1, _book.lastPage);
+    _page = math.max(1, widget.initialPage ?? _book.lastPage);
     _pageCount = _book.pageCount;
     _lib.db.markOpened(_book.id);
     _loadState();
@@ -65,18 +99,97 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _loadState() async {
     final marks = await _lib.db.bookmarks(_book.id);
+    final annotations = await _lib.db.annotations(_book.id);
     final night = await _lib.db.getSetting('mode_nuit') == '1';
     _update(() {
       _bookmarks = marks;
       _night = night;
     });
+    _setAnnotations(annotations);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _saveNow();
+    _searcher.removeListener(_onSearchChanged);
+    _searcher.dispose();
+    _searchField.dispose();
     super.dispose();
+  }
+
+  // ------------------------------------------------- Recherche dans le livre
+
+  void _onSearchChanged() => _update(() {});
+
+  void _openSearch() => setState(() => _searchMode = true);
+
+  void _closeSearch() {
+    _searcher.resetTextSearch();
+    _searchField.clear();
+    setState(() => _searchMode = false);
+  }
+
+  void _runSearch(String query) {
+    final text = query.trim();
+    if (text.isEmpty) {
+      _searcher.resetTextSearch();
+    } else {
+      _searcher.startTextSearch(text, caseInsensitive: true);
+    }
+  }
+
+  String _searchCounter() {
+    if (_searchField.text.trim().isEmpty) return '';
+    final count = _searcher.matches.length;
+    if (count == 0) return _searcher.isSearching ? '' : '0';
+    final index = _searcher.currentIndex;
+    return '${index == null ? 0 : index + 1}/$count';
+  }
+
+  AppBar _buildSearchBar() {
+    return AppBar(
+      leading: IconButton(
+        icon: const Icon(Icons.close),
+        tooltip: 'Fermer la recherche',
+        onPressed: _closeSearch,
+      ),
+      titleSpacing: 0,
+      title: TextField(
+        controller: _searchField,
+        autofocus: true,
+        textInputAction: TextInputAction.search,
+        decoration: const InputDecoration(
+          hintText: 'Rechercher dans le livre',
+          border: InputBorder.none,
+        ),
+        onSubmitted: _runSearch,
+      ),
+      actions: [
+        if (_searcher.isSearching)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 8),
+            child: SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
+        Center(child: Text(_searchCounter())),
+        IconButton(
+          icon: const Icon(Icons.keyboard_arrow_up),
+          tooltip: 'Résultat précédent',
+          onPressed:
+              _searcher.hasMatches ? () => _searcher.goToPrevMatch() : null,
+        ),
+        IconButton(
+          icon: const Icon(Icons.keyboard_arrow_down),
+          tooltip: 'Résultat suivant',
+          onPressed:
+              _searcher.hasMatches ? () => _searcher.goToNextMatch() : null,
+        ),
+      ],
+    );
   }
 
   @override
@@ -106,6 +219,161 @@ class _ReaderScreenState extends State<ReaderScreen>
     _lib.db.saveLastPage(_book.id, _page);
   }
 
+  /// Redessine les pages (surlignages, points de note) si le lecteur est prêt.
+  void _repaintPages() {
+    if (_controller.isReady) _controller.invalidate();
+  }
+
+  // ------------------------------------------------------------ Annotations
+
+  void _setAnnotations(List<Annotation> annotations) {
+    final sorted = [...annotations]..sort((a, b) {
+        final byPage = a.page.compareTo(b.page);
+        return byPage != 0 ? byPage : a.createdAt.compareTo(b.createdAt);
+      });
+    final marks = <int, List<_Mark>>{};
+    final noted = <int>{};
+    for (final annotation in sorted) {
+      if (annotation.hasNote) noted.add(annotation.page);
+      final color = annotation.color;
+      if (color == null) continue;
+      annotation.rects.forEach((page, rects) {
+        for (final r in rects) {
+          if (r.length != 4) continue;
+          marks
+              .putIfAbsent(page, () => [])
+              .add(_Mark(PdfRect(r[0], r[1], r[2], r[3]), color));
+        }
+      });
+    }
+    _update(() {
+      _annotations = sorted;
+      _marks = marks;
+      _notedPages = noted;
+    });
+    _repaintPages();
+  }
+
+  /// Peint les surlignages et un point orange sur les pages annotées.
+  void _paintAnnotations(Canvas canvas, Rect pageRect, PdfPage page) {
+    final marks = _marks[page.pageNumber];
+    if (marks != null) {
+      for (final mark in marks) {
+        final argb = _night ? _invert(mark.color) : mark.color;
+        final paint = Paint()
+          ..color = Color(argb).withValues(alpha: 0.4)
+          ..blendMode = BlendMode.multiply;
+        canvas.drawRect(
+          mark.rect.toRectInDocument(page: page, pageRect: pageRect),
+          paint,
+        );
+      }
+    }
+    if (_notedPages.contains(page.pageNumber)) {
+      final radius = pageRect.width * 0.018;
+      final center = Offset(
+        pageRect.right - radius * 2.5,
+        pageRect.top + radius * 2.5,
+      );
+      final argb = _night ? _invert(_noteDotColor) : _noteDotColor;
+      canvas.drawCircle(center, radius, Paint()..color = Color(argb));
+    }
+  }
+
+  Future<void> _highlightSelection(int argb, {bool withNote = false}) async {
+    final selection = _controller.textSelectionDelegate;
+    final ranges = await selection.getSelectedTextRanges();
+    final quote = (await selection.getSelectedText()).trim();
+
+    final rects = <int, List<List<double>>>{};
+    for (final range in ranges) {
+      for (final fragment in range.enumerateFragmentBoundingRects()) {
+        final b = fragment.bounds;
+        rects
+            .putIfAbsent(range.pageNumber, () => [])
+            .add([b.left, b.top, b.right, b.bottom]);
+      }
+    }
+    if (rects.isEmpty || quote.isEmpty) return;
+
+    var note = '';
+    if (withNote) {
+      if (!mounted) return;
+      final typed = await editNoteDialog(context, title: 'Note', quote: quote);
+      if (typed == null) return; // annulé : la sélection reste en place
+      note = typed.trim();
+    }
+
+    final now = DateTime.now();
+    final annotation = Annotation(
+      bookId: _book.id,
+      page: rects.keys.reduce((a, b) => a < b ? a : b),
+      quote: quote,
+      rects: rects,
+      color: argb,
+      note: note,
+      createdAt: now,
+      updatedAt: now,
+    );
+    final id = await _lib.db.insertAnnotation(annotation);
+    await selection.clearTextSelection();
+    _update(() => _hasSelection = false);
+    _setAnnotations([..._annotations, annotation.copyWith(id: id)]);
+  }
+
+  Future<void> _addPageNote() async {
+    final page = _page;
+    final typed = await editNoteDialog(context, title: 'Note · page $page');
+    final note = typed?.trim() ?? '';
+    if (note.isEmpty) return;
+    final now = DateTime.now();
+    final annotation = Annotation(
+      bookId: _book.id,
+      page: page,
+      quote: null,
+      rects: const {},
+      color: null,
+      note: note,
+      createdAt: now,
+      updatedAt: now,
+    );
+    final id = await _lib.db.insertAnnotation(annotation);
+    _setAnnotations([..._annotations, annotation.copyWith(id: id)]);
+  }
+
+  Future<void> _editAnnotation(Annotation annotation) async {
+    final typed = await editNoteDialog(
+      context,
+      title: 'Note · page ${annotation.page}',
+      quote: annotation.quote,
+      initial: annotation.note,
+    );
+    if (typed == null) return;
+    final note = typed.trim();
+    if (!annotation.isHighlight && note.isEmpty) {
+      await _deleteAnnotation(annotation); // note libre vidée = supprimée
+      return;
+    }
+    await _lib.db.updateAnnotationNote(annotation.id!, note);
+    final now = DateTime.now();
+    _setAnnotations([
+      for (final a in _annotations)
+        a.id == annotation.id ? a.copyWith(note: note, updatedAt: now) : a,
+    ]);
+  }
+
+  Future<void> _deleteAnnotation(Annotation annotation) async {
+    _setAnnotations(
+        _annotations.where((a) => a.id != annotation.id).toList());
+    await _lib.db.deleteAnnotation(annotation.id!);
+  }
+
+  Future<void> _copyAllNotes() async {
+    final markdown = annotationsToMarkdown(_book.title, _annotations);
+    await Clipboard.setData(ClipboardData(text: markdown));
+    if (mounted) _snack('${_annotations.length} annotations copiées (Markdown)');
+  }
+
   // ----------------------------------------------------- Rappels du lecteur
 
   void _onViewerReady(PdfDocument document, PdfViewerController controller) {
@@ -114,6 +382,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       _update(() => _pageCount = count);
       _lib.db.setPageCount(_book.id, count);
     }
+    _repaintPages();
   }
 
   void _onPageChanged(int? pageNumber) {
@@ -191,6 +460,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _toggleNight() async {
     setState(() => _night = !_night);
+    _repaintPages();
     await _lib.db.setSetting('mode_nuit', _night ? '1' : '0');
   }
 
@@ -280,8 +550,43 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
+  void _showNotes() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        minChildSize: 0.3,
+        maxChildSize: 0.95,
+        builder: (_, scrollController) => StatefulBuilder(
+          builder: (sheetContext, setSheetState) => NotesPanel(
+            annotations: _annotations,
+            scrollController: scrollController,
+            onCopyAll: _copyAllNotes,
+            onOpen: (annotation) {
+              Navigator.pop(sheetContext);
+              _goTo(annotation.page);
+            },
+            onEdit: (annotation) async {
+              await _editAnnotation(annotation);
+              setSheetState(() {});
+            },
+            onDelete: (annotation) {
+              _deleteAnnotation(annotation);
+              setSheetState(() {});
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
   void _onMenu(_MenuAction action) {
     switch (action) {
+      case _MenuAction.addNote:
+        _addPageNote();
       case _MenuAction.bookmarks:
         _showBookmarks();
       case _MenuAction.goToPage:
@@ -300,17 +605,24 @@ class _ReaderScreenState extends State<ReaderScreen>
     final theme = Theme.of(context);
     final count = _pageCount;
     final marked = _bookmarks.contains(_page);
+    final notesHere = _annotations
+        .where((a) => a.page == _page || a.rects.containsKey(_page))
+        .length;
     final position = count == null
         ? 'Page $_page'
         : 'Page $_page / $count · ${(_page * 100 / count).round()} %';
 
     return PopScope(
-      // Enregistre la page avant que la bibliothèque ne se recharge.
+      canPop: !_searchMode,
       onPopInvokedWithResult: (didPop, result) {
-        if (didPop) _saveNow();
+        if (didPop) {
+          _saveNow(); // avant que la bibliothèque ne se recharge
+        } else {
+          _closeSearch();
+        }
       },
       child: Scaffold(
-        appBar: AppBar(
+        appBar: _searchMode ? _buildSearchBar() : AppBar(
           titleSpacing: 0,
           title: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -327,6 +639,20 @@ class _ReaderScreenState extends State<ReaderScreen>
           ),
           actions: [
             IconButton(
+              icon: const Icon(Icons.search),
+              tooltip: 'Rechercher dans le livre',
+              onPressed: _openSearch,
+            ),
+            IconButton(
+              tooltip: 'Notes et surlignages',
+              onPressed: _showNotes,
+              icon: Badge(
+                isLabelVisible: notesHere > 0,
+                label: Text('$notesHere'),
+                child: const Icon(Icons.sticky_note_2_outlined),
+              ),
+            ),
+            IconButton(
               icon: Icon(marked ? Icons.bookmark : Icons.bookmark_border),
               tooltip: marked ? 'Retirer le marque-page' : 'Marquer cette page',
               onPressed: _toggleBookmark,
@@ -334,6 +660,14 @@ class _ReaderScreenState extends State<ReaderScreen>
             PopupMenuButton<_MenuAction>(
               onSelected: _onMenu,
               itemBuilder: (context) => [
+                const PopupMenuItem(
+                  value: _MenuAction.addNote,
+                  child: ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.note_add_outlined),
+                    title: Text('Note sur cette page'),
+                  ),
+                ),
                 const PopupMenuItem(
                   value: _MenuAction.bookmarks,
                   child: ListTile(
@@ -372,56 +706,75 @@ class _ReaderScreenState extends State<ReaderScreen>
             ),
           ],
         ),
-        body: ColorFiltered(
-          colorFilter: _night ? _nightFilter : _dayFilter,
-          child: PdfViewer.file(
-            _lib.pathOf(_book),
-            controller: _controller,
-            // Valeur lue une seule fois à l'ouverture : ne pas y mettre _page,
-            // sinon le lecteur serait reconfiguré à chaque changement de page.
-            initialPageNumber: math.max(1, _book.lastPage),
-            params: PdfViewerParams(
-              backgroundColor: const Color(0xFFE0E0E0),
-              onViewerReady: _onViewerReady,
-              onPageChanged: _onPageChanged,
-              textSelectionParams: PdfTextSelectionParams(
-                onTextSelectionChange: (selection) =>
-                    _update(() => _hasSelection = selection.hasSelectedText),
-              ),
-              viewerOverlayBuilder: (context, size, handleLinkTap) => [
-                PdfViewerScrollThumb(
+        body: Stack(
+          children: [
+            Positioned.fill(
+              child: ColorFiltered(
+                colorFilter: _night ? _nightFilter : _dayFilter,
+                child: PdfViewer.file(
+                  _lib.pathOf(_book),
                   controller: _controller,
-                  orientation: ScrollbarOrientation.right,
-                  thumbSize: const Size(44, 28),
-                  thumbBuilder: (context, thumbSize, pageNumber, controller) =>
-                      DecoratedBox(
-                    decoration: const BoxDecoration(
-                      color: Color(0xDD000000),
-                      borderRadius:
-                          BorderRadius.horizontal(left: Radius.circular(14)),
+                  // Lu une seule fois à l'ouverture : ne pas y mettre _page,
+                  // sinon le lecteur serait reconfiguré à chaque page.
+                  initialPageNumber:
+                      math.max(1, widget.initialPage ?? _book.lastPage),
+                  params: PdfViewerParams(
+                    backgroundColor: const Color(0xFFE0E0E0),
+                    onViewerReady: _onViewerReady,
+                    onPageChanged: _onPageChanged,
+                    pagePaintCallbacks: [
+                      _paintAnnotations,
+                      _searcher.pageTextMatchPaintCallback,
+                    ],
+                    textSelectionParams: PdfTextSelectionParams(
+                      onTextSelectionChange: (selection) => _update(
+                          () => _hasSelection = selection.hasSelectedText),
                     ),
-                    child: Center(
-                      child: Text(
-                        pageNumber.toString(),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 12,
+                    viewerOverlayBuilder: (context, size, handleLinkTap) => [
+                      PdfViewerScrollThumb(
+                        controller: _controller,
+                        orientation: ScrollbarOrientation.right,
+                        thumbSize: const Size(44, 28),
+                        thumbBuilder:
+                            (context, thumbSize, pageNumber, controller) =>
+                                DecoratedBox(
+                          decoration: const BoxDecoration(
+                            color: Color(0xDD000000),
+                            borderRadius: BorderRadius.horizontal(
+                                left: Radius.circular(14)),
+                          ),
+                          child: Center(
+                            child: Text(
+                              pageNumber.toString(),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
                         ),
                       ),
-                    ),
+                    ],
                   ),
                 ),
-              ],
+              ),
             ),
-          ),
+            if (_hasSelection)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Center(
+                  child: SelectionBar(
+                    onCopy: _copySelection,
+                    onHighlight: (argb) => _highlightSelection(argb),
+                    onNote: () => _highlightSelection(highlightColors.first,
+                        withNote: true),
+                  ),
+                ),
+              ),
+          ],
         ),
-        floatingActionButton: _hasSelection
-            ? FloatingActionButton.extended(
-                onPressed: _copySelection,
-                icon: const Icon(Icons.copy),
-                label: const Text('Copier'),
-              )
-            : null,
       ),
     );
   }

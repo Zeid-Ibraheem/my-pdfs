@@ -1,68 +1,89 @@
 # My PDFs
 
-Lecteur et bibliothèque PDF personnelle pour Android, en Flutter.
+Lecteur et bibliothèque PDF personnelle pour Android (Flutter), avec son propre serveur : stockage de 200 Go, recherche plein texte, sauvegardes et recherche de livres libres en ligne.
 
-## Ce que fait la version 0.1 (phase 1)
+## Fonctionnalités (version 0.3)
 
-- **Import** de un ou plusieurs PDF. Chaque fichier est copié dans l'appli et identifié par son empreinte SHA-256 (un code unique calculé à partir du contenu) : un même livre importé deux fois est détecté comme doublon.
-- **Bibliothèque** avec miniature de la page 1, progression, recherche par titre (sans tenir compte des accents) et tri (lus récemment, titre, date d'ajout). Appui long sur un livre pour le renommer ou le supprimer.
-- **Lecture en défilement vertical continu**, avec un curseur à droite pour aller vite dans un long livre.
-- **Reprise automatique** à la dernière page lue, même si Android ferme l'appli en arrière-plan.
-- **Marque-pages** : icône en haut pour marquer la page en cours, liste dans le menu ⋮.
-- **Copier du texte** : appui long sur un mot, ajuste la sélection, puis bouton « Copier ». Le menu ⋮ permet aussi de copier tout le texte de la page.
-- **Mode nuit** (couleurs inversées) et **aller à la page n**.
+**Lecture**
+- Défilement vertical continu, curseur à droite pour aller vite, reprise à la dernière page lue.
+- Marque-pages, « aller à la page », mode nuit.
+- Recherche dans le livre ouvert (loupe en haut), avec les résultats surlignés.
 
-Limite connue : sur un PDF scanné (pages en image), il n'y a pas de texte à copier. Il faudra l'OCR (reconnaissance de caractères), prévu plus tard.
+**Annotations**
+- Sélection de texte (appui long) : copier, surligner en 4 couleurs, surligner + note.
+- Notes libres par page, point orange sur les pages annotées.
+- Panneau « Notes et surlignages » : relire, modifier, supprimer, tout copier en Markdown.
+- Les PDF ne sont jamais modifiés : tout est enregistré à part, lié à l'empreinte SHA-256 de chaque fichier.
+
+**Rangement**
+- Catégories créées par toi (un livre peut être dans plusieurs) + filtres automatiques : En cours, Pas commencés, Terminés.
+- Tri visible au-dessus de la liste : lus récemment, titre, date d'ajout, progression, nombre de pages, taille, avec ordre inverse.
+- Recherche par titre (sans tenir compte des accents).
+
+**Serveur (onglets Recherche, Découvrir, Réglages)**
+- Les livres du serveur apparaissent dans la bibliothèque comme les autres ; ils se téléchargent à l'ouverture.
+- Envoi sur le serveur (automatique à l'import, ou livre par livre), « Libérer de la place », épinglage, limite de place sur le téléphone.
+- Recherche d'un mot dans le texte de tous les livres du serveur.
+- Découvrir : livres libres sur Internet Archive, Open Library et Gallica ; « Ajouter » les télécharge sur le serveur.
+- Sauvegarde automatique des catégories, notes et progression après chaque lecture, et restauration.
+
+Limite : pas d'OCR, donc pas de texte copiable ni cherchable dans les pages scannées.
 
 ## Installation
 
-Prérequis : Flutter **3.47 ou plus** (`flutter upgrade`), le SDK Android, et le téléphone en mode débogage USB.
+### 1. Le serveur (sur la machine allumée 24 h/24, avec Tailscale)
 
 ```bash
-cd my_pdfs
-chmod +x setup.sh
-./setup.sh            # une seule fois : crée android/, ajoute les paquets, vérifie le code
-flutter run --release # installe et lance sur le téléphone branché
+git clone https://github.com/Zeid-Ibraheem/my-pdfs.git
+cd my-pdfs/server
+./install.sh
 ```
 
-`--release` rend le défilement bien plus fluide que le mode debug. Pour développer avec le rechargement à chaud, utilise `flutter run` sans option.
+Le script affiche à la fin l'**adresse** et le **jeton** à saisir dans l'appli. Détails : [server/README.md](server/README.md).
 
-Pour installer l'appli dans un seul profil du téléphone : `adb shell pm list users`, puis `flutter run --release --device-user <ID>`.
+### 2. L'appli (sur le PC, téléphone branché en USB)
+
+Prérequis : Flutter **3.47 ou plus** (`flutter upgrade`) et le SDK Android.
+
+```bash
+cd my-pdfs
+./setup.sh            # crée android/, ajoute les paquets, vérifie le code (relançable)
+flutter run --release # installe et lance sur le téléphone
+```
+
+Puis dans l'appli : onglet **Réglages** > adresse + jeton > « Tester et enregistrer ». Tailscale doit être actif sur le téléphone, dans le même profil que l'appli.
 
 ## Organisation du code
 
 ```
 lib/
-  main.dart                 démarrage, thème clair/sombre
-  data/book.dart            modèle Livre + ordres de tri
-  data/database.dart        base SQLite : livres, marque-pages, réglages
-  data/library.dart         import (copie + empreinte), suppression
-  ui/library_screen.dart    écran Bibliothèque
-  ui/book_tile.dart         une ligne de la liste (miniature, progression)
-  ui/reader_screen.dart     lecteur (pdfrx), marque-pages, copie, mode nuit
-  util/text.dart            titres, recherche sans accents, tailles
-test/text_test.dart         tests des fonctions de texte
+  main.dart                    démarrage, thème clair/sombre
+  data/
+    book.dart                  modèle Livre, tri
+    category.dart              catégories, filtres
+    annotation.dart            surlignages, notes, export Markdown
+    database.dart              base SQLite (version 3)
+    library.dart               fichiers, import, serveur, cache, sauvegarde
+    server_api.dart            client HTTP du serveur
+  ui/
+    home_screen.dart           onglets du bas
+    library_screen.dart        bibliothèque
+    reader_screen.dart         lecteur (pdfrx)
+    search_screen.dart         recherche plein texte
+    discover_screen.dart       livres libres en ligne
+    settings_screen.dart       réglages
+    book_tile.dart, annotation_widgets.dart, common.dart
+  util/text.dart               titres, accents, tailles, dates
+server/                        serveur Python (Starlette), tests, install.sh
+test/                          tests de l'appli
 ```
-
-Choix importants :
-
-- Les PDF ne sont jamais modifiés. Marque-pages et progression vivent dans la base `my_pdfs.db`, liés à l'empreinte du fichier.
-- La base ne stocke que le nom du fichier (`<empreinte>.pdf`), pas son chemin complet, qui peut changer d'un profil Android à l'autre.
-
-## Feuille de route
-
-1. ~~Lecteur local~~ (cette version)
-2. Catégories (manuelles et automatiques) et notes par page
-3. Stockage sur le serveur debi (200 Go) et cache local
-4. Sauvegarde de `my_pdfs.db` sur debi
-5. Recherche plein texte (OCR plus tard)
-6. Recherche de livres libres en ligne (Internet Archive, Open Library, Gallica)
 
 ## Dépannage
 
-| Erreur | Solution |
+| Problème | Solution |
 | --- | --- |
-| `pdfrx requires Flutter >= 3.47` ou échec de `pub add` | `flutter upgrade` puis relancer `./setup.sh` |
-| Erreur de compilation native (NDK, CMake) | Installer le NDK depuis Android Studio > SDK Manager > SDK Tools |
-| `minSdkVersion` trop bas | Dans `android/app/build.gradle.kts`, mettre `minSdk = 24` |
-| Avertissements sur `package:flutter/material.dart` | Normal : l'appli utilise déjà `material_ui`, le nouveau paquet Material |
+| `pdfrx requires Flutter >= 3.47` | `flutter upgrade` puis `./setup.sh` |
+| « Serveur injoignable » | Tailscale activé sur le téléphone ? Serveur allumé ? `systemctl status my-pdfs` sur le serveur |
+| « Jeton refusé » | Recopie le jeton : `sed -n 's/^MYPDFS_TOKEN=//p' ~/my-pdfs-data/server.env` |
+| Erreur de compilation native (NDK) | Android Studio > SDK Manager > SDK Tools > NDK |
+| `minSdkVersion` trop bas | `android/app/build.gradle.kts` : `minSdk = 24` |
