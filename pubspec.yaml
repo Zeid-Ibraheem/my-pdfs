@@ -1,0 +1,21 @@
+name: bibli
+description: Lecteur et bibliothèque PDF personnelle pour Android.
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.9.0
+
+# Les paquets (pdfrx, sqflite, file_picker…) sont ajoutés par setup.sh
+# avec `flutter pub add`, pour récupérer les dernières versions compatibles
+# avec ton Flutter.
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
