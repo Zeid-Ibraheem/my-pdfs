@@ -1,7 +1,7 @@
 name: my_pdfs
 description: Lecteur et bibliothèque PDF personnelle pour Android.
 publish_to: 'none'
-version: 0.5.0+5
+version: 0.5.1+6
 
 environment:
   sdk: ^3.9.0

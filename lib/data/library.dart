@@ -227,10 +227,22 @@ class Library extends ChangeNotifier {
     final api = _requireApi();
     var since = int.tryParse(await _db.getSetting(_kSyncSeq) ?? '') ?? 0;
     var epoch = await _db.getSetting(_kSyncEpoch);
+    if (epoch != null && epoch.isEmpty) epoch = null;
     for (var round = 0; round < 200; round++) {
       final outgoing = await _db.dirtyItems();
       final response =
           await api.syncState(since: since, epoch: epoch, changes: outgoing);
+      if (response.wipe) {
+        // Tout a été effacé depuis l'autre profil : on efface ici aussi,
+        // sans renvoyer nos anciennes données au serveur.
+        await _db.wipeReadingData(books: false);
+        await _db.setSetting(_kLastBackup, '');
+        since = 0;
+        epoch = response.epoch;
+        await _db.setSetting(_kSyncEpoch, epoch);
+        await _db.setSetting(_kSyncSeq, '0');
+        continue;
+      }
       if (epoch != null && response.epoch != epoch) {
         // Base du serveur recréée : on lui renvoie tout ce qu'on a.
         await _db.markAllDirty();
@@ -506,6 +518,47 @@ class Library extends ChangeNotifier {
       await syncWithServer();
     } on ServerException {
       // Pas grave : la synchro se refera au prochain rafraîchissement.
+    }
+    notifyListeners();
+  }
+
+  // ------------------------------------------------------- Effacement
+
+  /// Efface définitivement toutes les sauvegardes : sur le serveur (état
+  /// synchronisé + sauvegardes quotidiennes) puis sur ce téléphone (notes,
+  /// surlignages, marque-pages, catégories, pages en cours, fichiers
+  /// temporaires). Avec [books], supprime aussi tous les livres, partout.
+  ///
+  /// Si un serveur est configuré et injoignable, rien n'est effacé (pour ne
+  /// pas laisser le serveur renvoyer les données au prochain démarrage).
+  Future<void> wipeEverything({required bool books}) async {
+    final api = _api;
+    String? newEpoch;
+    if (api != null) newEpoch = await api.wipeEverything(books: books);
+
+    await _db.wipeReadingData(books: books);
+    await _db.setSetting(_kSyncSeq, '0');
+    await _db.setSetting(_kSyncEpoch, newEpoch ?? '');
+    await _db.setSetting(_kLastBackup, '');
+
+    if (books) {
+      for (final folder in [booksDir, covers.dir]) {
+        final dir = Directory(folder);
+        if (!await dir.exists()) continue;
+        await for (final entry in dir.list()) {
+          if (entry is File) await _deleteQuietly(entry);
+        }
+      }
+    }
+    // Copies temporaires : imports (file_picker), sauvegardes, restaurations.
+    try {
+      await FilePicker.clearTemporaryFiles();
+    } catch (_) {
+      // Rien à nettoyer.
+    }
+    final tmp = await getTemporaryDirectory();
+    for (final name in ['my_pdfs-sauvegarde.db', 'restauration.db']) {
+      await _deleteQuietly(File(p.join(tmp.path, name)));
     }
     notifyListeners();
   }

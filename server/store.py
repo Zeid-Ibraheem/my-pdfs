@@ -456,6 +456,49 @@ class Store:
             "deleted": bool(change.get("deleted", False)),
         }
 
+    # ------------------------------------------------- effacement total
+
+    def wiped_epochs(self) -> set[str]:
+        with self._lock:
+            row = self._db.execute("SELECT value FROM meta WHERE key = 'wiped'").fetchone()
+        return set(json.loads(row[0])) if row else set()
+
+    def wipe(self, delete_books: bool) -> dict:
+        """Efface définitivement l'état synchronisé (pages, notes, surlignages,
+        marque-pages, catégories) et toutes les sauvegardes ; avec
+        [delete_books], aussi tous les livres, leur texte et leurs couvertures.
+
+        L'ancien identifiant de base est noté « effacé » : un autre profil qui
+        se synchronise ensuite efface ses propres données au lieu de les
+        renvoyer (sinon elles reviendraient)."""
+        deleted_books = 0
+        with self._lock:
+            wiped = self.wiped_epochs() | {self.epoch}
+            self.epoch = uuid.uuid4().hex
+            self._db.execute("DELETE FROM state")
+            self._db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('epoch', ?)", (self.epoch,)
+            )
+            self._db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('wiped', ?)",
+                (json.dumps(sorted(wiped)),),
+            )
+            if delete_books:
+                ids = [r[0] for r in self._db.execute("SELECT id FROM books").fetchall()]
+                self._db.execute("DELETE FROM pages")
+                self._db.execute("DELETE FROM books")
+                deleted_books = len(ids)
+            self._db.commit()
+        for backup in self.backups_dir.glob("*.db"):
+            backup.unlink(missing_ok=True)
+        if delete_books:
+            for folder in (self.books_dir, self.covers_dir):
+                for file in folder.iterdir():
+                    if file.is_file():
+                        file.unlink(missing_ok=True)
+        log.warning("Effacement total (livres : %s)", "oui" if delete_books else "non")
+        return {"epoch": self.epoch, "deleted_books": deleted_books}
+
     # ----------------------------------------------------------- sauvegardes
 
     def save_backup(self, incoming: IncomingFile) -> dict:

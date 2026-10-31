@@ -801,6 +801,33 @@ class AppDatabase {
     }
   }
 
+  // ------------------------------------------------------- Effacement
+
+  /// Efface définitivement les données de lecture de ce profil : notes,
+  /// surlignages, marque-pages, catégories, pages en cours et état de
+  /// synchronisation. Avec [books], supprime aussi la liste des livres.
+  Future<void> wipeReadingData({required bool books}) async {
+    await _db.transaction((txn) async {
+      for (final table in [
+        'bookmarks',
+        'annotations',
+        'book_categories',
+        'categories',
+        'sync_items',
+        'seen_downloads',
+      ]) {
+        await txn.delete(table);
+      }
+      if (books) {
+        await txn.delete('books');
+      } else {
+        await txn.rawUpdate(
+            'UPDATE books SET last_page = 1, last_opened_at = NULL');
+      }
+      await txn.delete('settings', where: "key IN ('filtre')");
+    });
+  }
+
   // -------------------------------------------------------------- Réglages
 
   Future<String?> getSetting(String key) async {

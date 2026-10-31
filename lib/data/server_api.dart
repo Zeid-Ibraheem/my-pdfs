@@ -242,6 +242,12 @@ class ServerApi {
     if (status == 401) {
       throw const ServerException('Jeton refusé par le serveur');
     }
+    if (status == 404 && detail.trim() == 'Not Found') {
+      // Adresse inconnue du serveur : il tourne une ancienne version.
+      throw const ServerException(
+          'Serveur pas à jour : sur le serveur, lance « cd ~/my-pdfs && '
+          'git pull && cd server && ./install.sh »');
+    }
     throw ServerException(detail.isEmpty ? 'Erreur $status du serveur' : detail);
   }
 
@@ -465,11 +471,31 @@ class ServerApi {
         epoch: json['epoch'] as String,
         seq: (json['seq'] as num).toInt(),
         more: json['more'] == true,
+        wipe: json['wipe'] == true,
         changes: [
           for (final c in json['changes'] as List<dynamic>)
             SyncItem.fromJson(c as Map<String, dynamic>),
         ],
       );
+    });
+  }
+
+  /// Efface définitivement sur le serveur l'état synchronisé et toutes les
+  /// sauvegardes ; avec [books], aussi tous les livres. Renvoie le nouvel
+  /// identifiant de base d'état.
+  Future<String> wipeEverything({required bool books}) {
+    return _guard(() async {
+      final response = await _client
+          .post(
+            _uri('/api/wipe'),
+            headers: {..._auth, 'Content-Type': 'application/json'},
+            body: jsonEncode({'confirm': 'SUPPRIMER', 'books': books}),
+          )
+          .timeout(const Duration(minutes: 2));
+      _check(response.statusCode, response.bodyBytes);
+      final json = jsonDecode(utf8.decode(response.bodyBytes))
+          as Map<String, dynamic>;
+      return json['epoch'] as String;
     });
   }
 
@@ -502,10 +528,14 @@ class StateResponse {
     required this.seq,
     required this.more,
     required this.changes,
+    this.wipe = false,
   });
 
   final String epoch;
   final int seq;
   final bool more;
   final List<SyncItem> changes;
+
+  /// Tout a été effacé depuis un autre appareil : effacer ici aussi.
+  final bool wipe;
 }

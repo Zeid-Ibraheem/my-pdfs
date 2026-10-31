@@ -273,6 +273,30 @@ class ServerTest(unittest.TestCase):
         else:
             self.assertEqual(r.status_code, 404)
 
+    def test_wipe(self):
+        pdf = make_pdf(["A effacer"])
+        self.upload(pdf, title="A effacer")
+        self.wait_text(sha(pdf))
+        old = self.post_state(changes=[
+            {"kind": "annotation", "key": "w1", "data": {"note": "x"}, "updated_at": 7}])
+        r = requests.post(self.url("/api/wipe"), headers=AUTH, timeout=5, json={})
+        self.assertEqual(r.status_code, 400)  # sans confirmation : refusé
+        r = requests.post(self.url("/api/wipe"), headers=AUTH, timeout=5,
+                          json={"confirm": "SUPPRIMER", "books": True})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertNotEqual(r.json()["epoch"], old["epoch"])
+        # Un autre profil resté sur l'ancienne base reçoit l'ordre d'effacer,
+        # et ses anciennes données ne reviennent pas sur le serveur.
+        stale = self.post_state(epoch=old["epoch"], changes=[
+            {"kind": "annotation", "key": "w1", "data": {"note": "x"}, "updated_at": 9}])
+        self.assertTrue(stale["wipe"])
+        fresh = self.post_state(epoch=r.json()["epoch"])
+        self.assertEqual(fresh["changes"], [])
+        books = requests.get(self.url("/api/books"), headers=AUTH, timeout=5).json()
+        self.assertEqual(books, [])
+        self.assertEqual(
+            requests.get(self.url("/api/backups"), headers=AUTH, timeout=5).json(), [])
+
     def test_discover_rejects_other_sources(self):
         r = requests.post(
             self.url("/api/discover/import"),

@@ -5,7 +5,7 @@ import '../data/server_api.dart';
 import '../util/text.dart';
 import 'common.dart';
 
-const appVersion = '0.5.0';
+const appVersion = '0.5.1';
 
 /// Onglet Réglages : connexion au serveur, place sur le téléphone,
 /// sauvegarde des notes et de la progression.
@@ -180,6 +180,83 @@ class _SettingsScreenState extends State<SettingsScreen> {
         await _lib.backupNow();
         if (mounted) showSnack(context, 'Sauvegarde envoyée sur le serveur');
       });
+
+  /// Efface définitivement toutes les sauvegardes (et, au choix, les livres),
+  /// sur le téléphone et sur le serveur. Double confirmation.
+  Future<void> _wipeEverything() async {
+    final typed = TextEditingController();
+    var withBooks = false;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (dialogContext, setDialog) => AlertDialog(
+          title: const Text('Tout effacer définitivement ?'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Seront supprimés, sans retour possible :\n'
+                  '• notes, surlignages, marque-pages, catégories et pages '
+                  'en cours, sur ce téléphone et sur le serveur ;\n'
+                  '• toutes les sauvegardes du serveur ;\n'
+                  '• les fichiers temporaires de l’appli.\n\n'
+                  '${_lib.hasServer ? 'Ton autre profil effacera aussi les siens à sa prochaine synchro.' : 'Aucun serveur configuré : seul ce téléphone est concerné.'}',
+                ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: withBooks,
+                  onChanged: (value) =>
+                      setDialog(() => withBooks = value ?? false),
+                  title: const Text('Supprimer aussi tous les livres (PDF)'),
+                  subtitle: Text(_lib.hasServer
+                      ? 'Sur ce téléphone et sur le serveur'
+                      : 'Sur ce téléphone'),
+                ),
+                const SizedBox(height: 8),
+                const Text('Tape SUPPRIMER pour confirmer :'),
+                TextField(
+                  controller: typed,
+                  autocorrect: false,
+                  textCapitalization: TextCapitalization.characters,
+                  onChanged: (_) => setDialog(() {}),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Annuler'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(dialogContext).colorScheme.error,
+                foregroundColor: Theme.of(dialogContext).colorScheme.onError,
+              ),
+              onPressed: typed.text.trim() == 'SUPPRIMER'
+                  ? () => Navigator.pop(dialogContext, true)
+                  : null,
+              child: const Text('Tout effacer'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _run(() async {
+      await runWithProgress<void>(
+        context,
+        'Effacement',
+        (progress, detail) => _lib.wipeEverything(books: withBooks),
+      );
+      if (mounted) {
+        showSnack(context,
+            withBooks ? 'Tout a été effacé, livres compris' : 'Sauvegardes effacées');
+      }
+    });
+  }
 
   Future<void> _restore() => _run(() async {
         final ok = await confirmDialog(
@@ -407,6 +484,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
             subtitle: const Text(
                 'Après un changement ou une réinitialisation du téléphone'),
             onTap: _restore,
+          ),
+
+          const _Header('Effacement'),
+          ListTile(
+            enabled: !_busy,
+            leading: Icon(Icons.delete_forever_outlined,
+                color: theme.colorScheme.error),
+            title: Text('Tout effacer définitivement',
+                style: TextStyle(color: theme.colorScheme.error)),
+            subtitle: const Text(
+                'Notes, surlignages, marque-pages, catégories, pages en cours '
+                'et sauvegardes, ici et sur le serveur (livres au choix)'),
+            onTap: _wipeEverything,
           ),
 
           const _Header('À propos'),

@@ -129,10 +129,24 @@ def create_app(settings: Settings | None = None) -> Starlette:
         since = body.get("since", 0)
         if not isinstance(since, int) or isinstance(since, bool):
             raise StoreError("since invalide")
+        epoch = body.get("epoch")
+        if epoch is not None and epoch in store.wiped_epochs():
+            # Tout a été effacé depuis un autre appareil : ce profil doit
+            # effacer ses données à son tour ; ses changements sont ignorés.
+            return JSONResponse({"epoch": store.epoch, "seq": 0, "more": False,
+                                 "changes": [], "wipe": True})
         # Base d'état recréée côté serveur : on renvoie tout depuis le début.
-        if body.get("epoch") not in (None, store.epoch):
+        if epoch not in (None, store.epoch):
             since = 0
         result = await run_in_threadpool(store.sync_state, since, body.get("changes", []))
+        return JSONResponse(result)
+
+    @protected
+    async def wipe(request: Request) -> Response:
+        body = await request.json()
+        if not isinstance(body, dict) or body.get("confirm") != "SUPPRIMER":
+            raise StoreError("Confirmation manquante")
+        result = await run_in_threadpool(store.wipe, bool(body.get("books", False)))
         return JSONResponse(result)
 
     @protected
@@ -240,6 +254,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
         Route("/api/books/{book_id}/file", download_book, methods=["GET"]),
         Route("/api/books/{book_id}/cover", book_cover, methods=["GET"]),
         Route("/api/state", sync_state, methods=["POST"]),
+        Route("/api/wipe", wipe, methods=["POST"]),
         Route("/api/search", search, methods=["GET"]),
         Route("/api/backups", list_backups, methods=["GET"]),
         Route("/api/backup", upload_backup, methods=["PUT"]),
