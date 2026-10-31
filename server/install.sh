@@ -13,7 +13,7 @@ PORT="${MYPDFS_PORT:-8765}"
 ENV_FILE="$DATA/server.env"
 
 echo "== Paquets système =="
-sudo apt-get install -y python3-venv >/dev/null
+sudo apt-get install -y python3-venv poppler-utils >/dev/null
 
 echo "== Environnement Python (dans $DIR/.venv) =="
 python3 -m venv "$DIR/.venv"

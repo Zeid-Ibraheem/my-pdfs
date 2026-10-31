@@ -20,7 +20,8 @@ class LibraryScreen extends StatefulWidget {
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
 
-class _LibraryScreenState extends State<LibraryScreen> {
+class _LibraryScreenState extends State<LibraryScreen>
+    with WidgetsBindingObserver {
   final _searchController = TextEditingController();
   List<Book> _books = const [];
   List<BookCategory> _categories = const [];
@@ -39,12 +40,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _lib.addListener(_onLibraryChanged);
     _init();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _lib.removeListener(_onLibraryChanged);
     _searchController.dispose();
     super.dispose();
@@ -52,6 +55,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   void _onLibraryChanged() {
     _reload();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Retour dans l'appli (par exemple après avoir lu sur l'autre profil) :
+    // on récupère les pages, notes et catégories modifiées ailleurs.
+    if (state == AppLifecycleState.resumed) {
+      _lib.syncQuietly(skipIfRecent: const Duration(seconds: 10));
+    }
   }
 
   /// Message après un import, avec un bouton pour envoyer aussi les
@@ -800,6 +812,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
           key: ValueKey(book.id),
           book: book,
           filePath: _lib.pathOf(book),
+          covers: _lib.covers,
+          api: _lib.api,
           categoryNames: _categoryNamesOf(book),
           annotationCount: _annotationCounts[book.id] ?? 0,
           serverConfigured: _lib.hasServer,

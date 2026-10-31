@@ -5,7 +5,7 @@ import '../data/server_api.dart';
 import '../util/text.dart';
 import 'common.dart';
 
-const appVersion = '0.4.2';
+const appVersion = '0.5.0';
 
 /// Onglet Réglages : connexion au serveur, place sur le téléphone,
 /// sauvegarde des notes et de la progression.

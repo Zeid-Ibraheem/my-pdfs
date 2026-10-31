@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/scheduler.dart';
@@ -67,8 +68,23 @@ class ReaderScreen extends StatefulWidget {
 
 class _ReaderScreenState extends State<ReaderScreen>
     with WidgetsBindingObserver {
-  final _controller = PdfViewerController();
+  PdfViewerController _controller = PdfViewerController();
   late int _page;
+
+  // Robustesse : le livre est-il chargé ? sinon, après un délai, on propose
+  // de réessayer au lieu de laisser un écran blanc.
+  int _generation = 0;
+  PdfDocumentRef? _documentRef;
+  int _documentRefGeneration = -1;
+  bool _ready = false;
+  bool _stuck = false;
+  Timer? _watchdog;
+  String? _fileProblem;
+
+  // Page d'ouverture : on n'enregistre la page que si elle a vraiment changé
+  // (ouvrir sans lire ne doit pas écraser la page lue sur l'autre profil).
+  late final int _openedAtPage;
+  bool _moved = false;
   int? _pageCount;
   Set<int> _bookmarks = {};
   List<Annotation> _annotations = const [];
@@ -97,15 +113,69 @@ class _ReaderScreenState extends State<ReaderScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _page = math.max(1, widget.initialPage ?? _book.lastPage);
     _pageCount = _book.pageCount;
+    var start = math.max(1, widget.initialPage ?? _book.lastPage);
+    final known = _book.pageCount;
+    if (known != null && known > 0 && start > known) start = known;
+    _page = start;
+    _openedAtPage = start;
+
+    // Pendant la lecture, aucune couverture n'est créée : tout le moteur
+    // PDF est pour le livre ouvert.
+    _lib.covers.pause();
+
     final api = _lib.api;
-    if (!_book.onDevice && _book.onServer && api != null) {
+    final localOk = _book.onDevice && _localFileLooksOk();
+    if (!localOk && _book.onServer && api != null) {
       _remoteUri = api.fileUri(_book.id);
       _remoteHeaders = api.authHeaders;
+    } else if (!localOk) {
+      _fileProblem = _book.onServer
+          ? 'Le fichier n’est plus sur le téléphone. Renseigne ton serveur '
+              'dans Réglages pour le lire depuis le serveur.'
+          : 'Le fichier de ce livre est introuvable ou vide sur le '
+              'téléphone. Supprime-le de la bibliothèque puis réimporte-le.';
     }
+    if (_fileProblem == null) _startWatchdog();
     _lib.db.markOpened(_book.id);
     _loadState();
+  }
+
+  bool _localFileLooksOk() {
+    try {
+      final file = File(_lib.pathOf(_book));
+      return file.existsSync() && file.lengthSync() > 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Si le livre n'est pas prêt au bout de 25 s, on affiche un message
+  /// avec « Réessayer » plutôt qu'un écran blanc sans fin.
+  void _startWatchdog() {
+    _watchdog?.cancel();
+    _watchdog = Timer(const Duration(seconds: 25), () {
+      if (mounted && !_ready) setState(() => _stuck = true);
+    });
+  }
+
+  /// Recrée le lecteur de zéro (nouveau document, nouveau contrôleur).
+  void _retry() {
+    final searcher = _searcher;
+    if (searcher != null) {
+      searcher.removeListener(_onSearchChanged);
+      searcher.dispose();
+    }
+    setState(() {
+      _searcher = null;
+      _searchMode = false;
+      _controller = PdfViewerController();
+      _generation++;
+      _ready = false;
+      _stuck = false;
+      _hasSelection = false;
+    });
+    _startWatchdog();
   }
 
   Future<void> _loadState() async {
@@ -122,6 +192,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _watchdog?.cancel();
+    _lib.covers.resume();
     _saveNow();
     final searcher = _searcher;
     if (searcher != null) {
@@ -240,7 +312,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   void _saveNow() {
     _saveTimer?.cancel();
     _saveTimer = null;
-    _lib.db.saveLastPage(_book.id, _page);
+    if (_moved) _lib.db.saveLastPage(_book.id, _page);
   }
 
   /// Redessine les pages (surlignages, points de note) si le lecteur est prêt.
@@ -401,6 +473,11 @@ class _ReaderScreenState extends State<ReaderScreen>
   // ----------------------------------------------------- Rappels du lecteur
 
   void _onViewerReady(PdfDocument document, PdfViewerController controller) {
+    _watchdog?.cancel();
+    _update(() {
+      _ready = true;
+      _stuck = false;
+    });
     _searcher ??= PdfTextSearcher(controller)..addListener(_onSearchChanged);
     final count = document.pages.length;
     if (count != _pageCount) {
@@ -412,6 +489,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _onPageChanged(int? pageNumber) {
     if (pageNumber == null || pageNumber == _page) return;
+    if (pageNumber != _openedAtPage) _moved = true;
     _update(() => _page = pageNumber);
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(seconds: 1), _saveNow);
@@ -634,6 +712,26 @@ class _ReaderScreenState extends State<ReaderScreen>
       onViewerReady: _onViewerReady,
       onPageChanged: _onPageChanged,
       pagePaintCallbacks: [_paintAnnotations, _paintSearchMatches],
+      loadingBannerBuilder: (context, bytesDownloaded, totalBytes) => Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(
+              value: totalBytes == null || totalBytes == 0
+                  ? null
+                  : (bytesDownloaded / totalBytes).clamp(0.0, 1.0).toDouble(),
+            ),
+            const SizedBox(height: 12),
+            const Text('Chargement du livre…'),
+          ],
+        ),
+      ),
+      errorBannerBuilder: (context, error, stackTrace, documentRef) =>
+          _ProblemCard(
+        title: 'Impossible d’ouvrir ce livre',
+        message: '$error',
+        onRetry: _retry,
+      ),
       textSelectionParams: PdfTextSelectionParams(
         onTextSelectionChange: (selection) =>
             _update(() => _hasSelection = selection.hasSelectedText),
@@ -662,9 +760,13 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Widget _buildViewer() {
+    final problem = _fileProblem;
+    if (problem != null) {
+      return _ProblemCard(title: 'Livre indisponible', message: problem);
+    }
     // Lu une seule fois à l'ouverture : ne pas y mettre _page, sinon le
     // lecteur serait reconfiguré à chaque changement de page.
-    final initialPage = math.max(1, widget.initialPage ?? _book.lastPage);
+    final initialPage = _openedAtPage;
     final remoteUri = _remoteUri;
     final remoteHeaders = _remoteHeaders;
     if (remoteUri != null && remoteHeaders != null) {
@@ -672,6 +774,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       // affichées sont transférées, rien n'est enregistré sur le téléphone.
       return PdfViewer.uri(
         remoteUri,
+        key: ValueKey('remote-$_generation'),
         headers: remoteHeaders,
         preferRangeAccess: true,
         controller: _controller,
@@ -679,8 +782,19 @@ class _ReaderScreenState extends State<ReaderScreen>
         params: _viewerParams(),
       );
     }
-    return PdfViewer.file(
-      _lib.pathOf(_book),
+    // Document propre à ce lecteur (clé unique) : rien d'autre dans l'appli
+    // ne peut le fermer pendant la lecture.
+    if (_documentRef == null || _documentRefGeneration != _generation) {
+      final path = _lib.pathOf(_book);
+      _documentRef = PdfDocumentRefFile(
+        path,
+        key: PdfDocumentRefKey(path, ['lecteur', identityHashCode(this), _generation]),
+      );
+      _documentRefGeneration = _generation;
+    }
+    return PdfViewer(
+      _documentRef!,
+      key: ValueKey('local-$_generation'),
       controller: _controller,
       initialPageNumber: initialPage,
       params: _viewerParams(),
@@ -802,6 +916,20 @@ class _ReaderScreenState extends State<ReaderScreen>
                 child: _buildViewer(),
               ),
             ),
+            if (_stuck)
+              Positioned.fill(
+                child: ColoredBox(
+                  color: theme.colorScheme.surface,
+                  child: _ProblemCard(
+                    title: 'Le livre ne s’affiche pas',
+                    message: 'Il met anormalement longtemps à charger. '
+                        'Réessaie ; si ça recommence, ferme le livre et '
+                        'rouvre-le.',
+                    onRetry: _retry,
+                    onClose: () => Navigator.of(context).maybePop(),
+                  ),
+                ),
+              ),
             if (_hasSelection)
               Positioned(
                 left: 0,
@@ -817,6 +945,70 @@ class _ReaderScreenState extends State<ReaderScreen>
                 ),
               ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Message clair (au lieu d'un écran blanc) quand un livre ne s'ouvre pas.
+class _ProblemCard extends StatelessWidget {
+  const _ProblemCard({
+    required this.title,
+    required this.message,
+    this.onRetry,
+    this.onClose,
+  });
+
+  final String title;
+  final String message;
+  final VoidCallback? onRetry;
+  final VoidCallback? onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Card(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.error_outline,
+                    size: 40, color: theme.colorScheme.error),
+                const SizedBox(height: 12),
+                Text(title,
+                    style: theme.textTheme.titleMedium,
+                    textAlign: TextAlign.center),
+                const SizedBox(height: 8),
+                Text(message,
+                    textAlign: TextAlign.center,
+                    maxLines: 8,
+                    overflow: TextOverflow.ellipsis),
+                if (onRetry != null || onClose != null) ...[
+                  const SizedBox(height: 16),
+                  Wrap(
+                    spacing: 8,
+                    alignment: WrapAlignment.center,
+                    children: [
+                      if (onClose != null)
+                        TextButton(
+                            onPressed: onClose, child: const Text('Fermer')),
+                      if (onRetry != null)
+                        FilledButton.icon(
+                          onPressed: onRetry,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Réessayer'),
+                        ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
         ),
       ),
     );

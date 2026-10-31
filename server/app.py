@@ -26,7 +26,7 @@ import discover
 from config import Settings, load_settings
 from store import NotFound, QuotaExceeded, Store, StoreError
 
-VERSION = "0.3.0"
+VERSION = "0.5.0"
 BOOK_ID = re.compile(r"[0-9a-f]{64}")
 MAX_BACKUP_BYTES = 500 * 1024 * 1024
 
@@ -101,7 +101,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
         except Exception:
             incoming.discard()
             raise
-        task = BackgroundTask(store.extract_text, book_id) if created else None
+        task = BackgroundTask(store.process, book_id) if created else None
         return JSONResponse(book, status_code=201 if created else 200, background=task)
 
     @protected
@@ -112,6 +112,28 @@ def create_app(settings: Settings | None = None) -> Starlette:
         if book is None or not path.exists():
             raise NotFound("Livre introuvable sur le serveur")
         return FileResponse(path, media_type="application/pdf")
+
+    @protected
+    async def book_cover(request: Request) -> Response:
+        book_id = book_id_of(request)
+        path = store.cover_of(book_id)
+        if not path.exists():
+            raise NotFound("Pas de couverture pour ce livre")
+        return FileResponse(path, media_type="image/png")
+
+    @protected
+    async def sync_state(request: Request) -> Response:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise StoreError("Requête invalide")
+        since = body.get("since", 0)
+        if not isinstance(since, int) or isinstance(since, bool):
+            raise StoreError("since invalide")
+        # Base d'état recréée côté serveur : on renvoie tout depuis le début.
+        if body.get("epoch") not in (None, store.epoch):
+            since = 0
+        result = await run_in_threadpool(store.sync_state, since, body.get("changes", []))
+        return JSONResponse(result)
 
     @protected
     async def update_book(request: Request) -> Response:
@@ -199,7 +221,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
             raise discover.SourceError(
                 f"Téléchargement impossible depuis Internet Archive ({type(exc).__name__})"
             ) from exc
-        task = BackgroundTask(store.extract_text, book["id"]) if created else None
+        task = BackgroundTask(store.process, book["id"]) if created else None
         return JSONResponse(book, status_code=201 if created else 200, background=task)
 
     @contextlib.asynccontextmanager
@@ -216,6 +238,8 @@ def create_app(settings: Settings | None = None) -> Starlette:
         Route("/api/books/{book_id}", update_book, methods=["PATCH"]),
         Route("/api/books/{book_id}", delete_book, methods=["DELETE"]),
         Route("/api/books/{book_id}/file", download_book, methods=["GET"]),
+        Route("/api/books/{book_id}/cover", book_cover, methods=["GET"]),
+        Route("/api/state", sync_state, methods=["POST"]),
         Route("/api/search", search, methods=["GET"]),
         Route("/api/backups", list_backups, methods=["GET"]),
         Route("/api/backup", upload_backup, methods=["PUT"]),

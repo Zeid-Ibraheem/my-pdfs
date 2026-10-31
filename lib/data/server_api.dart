@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
+import 'sync_item.dart';
+
 /// Erreur lisible renvoyée à l'écran (serveur injoignable, jeton refusé…).
 class ServerException implements Exception {
   const ServerException(this.message);
@@ -208,7 +210,10 @@ class ServerApi {
   static String _unreachable(String detail) {
     final lower = detail.toLowerCase();
     final String hint;
-    if (lower.contains('permission denied') || lower.contains('errno = 13')) {
+    if (lower.contains('permission denied') ||
+        lower.contains('operation not permitted') ||
+        lower.contains('errno = 13') ||
+        lower.contains('errno = 1,')) {
       hint = 'Android refuse l’accès réseau à l’appli : vérifie la '
           'permission « Réseau » de My PDFs dans les paramètres';
     } else if (lower.contains('failed host lookup')) {
@@ -432,6 +437,54 @@ class ServerApi {
     ];
   }
 
+  // ------------------------------------------------- État synchronisé
+
+  /// Envoie les changements locaux et reçoit ceux faits ailleurs depuis
+  /// [since] (voir server/store.py, sync_state).
+  Future<StateResponse> syncState({
+    required int since,
+    required String? epoch,
+    required List<SyncItem> changes,
+  }) {
+    return _guard(() async {
+      final response = await _client
+          .post(
+            _uri('/api/state'),
+            headers: {..._auth, 'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'since': since,
+              'epoch': epoch,
+              'changes': [for (final c in changes) c.toJson()],
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+      _check(response.statusCode, response.bodyBytes);
+      final json = jsonDecode(utf8.decode(response.bodyBytes))
+          as Map<String, dynamic>;
+      return StateResponse(
+        epoch: json['epoch'] as String,
+        seq: (json['seq'] as num).toInt(),
+        more: json['more'] == true,
+        changes: [
+          for (final c in json['changes'] as List<dynamic>)
+            SyncItem.fromJson(c as Map<String, dynamic>),
+        ],
+      );
+    });
+  }
+
+  /// Couverture (PNG) générée par le serveur, ou `null` s'il n'en a pas.
+  Future<List<int>?> cover(String id) async {
+    try {
+      final response = await _client
+          .get(_uri('/api/books/$id/cover'), headers: _auth)
+          .timeout(const Duration(seconds: 20));
+      return response.statusCode == 200 ? response.bodyBytes : null;
+    } catch (_) {
+      return null; // pas de couverture : l'appli affiche une icône
+    }
+  }
+
   Future<void> downloadLatestBackup(File dest) {
     return _guard(() async {
       final response = await _client
@@ -441,4 +494,18 @@ class ServerApi {
       await dest.writeAsBytes(response.bodyBytes, flush: true);
     });
   }
+}
+
+class StateResponse {
+  const StateResponse({
+    required this.epoch,
+    required this.seq,
+    required this.more,
+    required this.changes,
+  });
+
+  final String epoch;
+  final int seq;
+  final bool more;
+  final List<SyncItem> changes;
 }

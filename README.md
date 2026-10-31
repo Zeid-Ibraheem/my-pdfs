@@ -2,7 +2,7 @@
 
 Lecteur et bibliothèque PDF personnelle pour Android (Flutter), avec son propre serveur : stockage de 200 Go, recherche plein texte, sauvegardes et recherche de livres libres en ligne.
 
-## Fonctionnalités (version 0.4)
+## Fonctionnalités (version 0.5)
 
 **Lecture**
 - Défilement vertical continu, curseur à droite pour aller vite, reprise à la dernière page lue.
@@ -27,6 +27,8 @@ Lecteur et bibliothèque PDF personnelle pour Android (Flutter), avec son propre
 - Recherche d'un mot dans le texte de tous les livres du serveur.
 - Découvrir : livres libres sur Internet Archive, Open Library et Gallica ; « Ajouter » les télécharge sur le serveur.
 - Sauvegarde automatique des catégories, notes et progression après chaque lecture, et restauration.
+- **Synchronisation entre profils ou appareils** : page en cours, marque-pages, surlignages, notes, catégories et titres sont partagés via le serveur, élément par élément (la modification la plus récente gagne). Synchro au lancement, au retour dans l'appli, à l'ouverture et à la fermeture d'un livre.
+- Couvertures créées une seule fois en images (par le téléphone, ou par le serveur avec `pdftoppm` pour les livres qui n'y sont que sur le serveur).
 
 Limite : pas d'OCR, donc pas de texte copiable ni cherchable dans les pages scannées.
 

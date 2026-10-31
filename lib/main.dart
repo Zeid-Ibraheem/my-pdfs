@@ -1,4 +1,5 @@
 import 'package:material_ui/material_ui.dart';
+import 'package:pdfrx/pdfrx.dart';
 
 import 'data/library.dart';
 import 'ui/home_screen.dart';
@@ -21,8 +22,13 @@ Future<void> main() async {
           ),
         ),
       );
+  // Obligatoire avant d'utiliser le moteur PDF hors des widgets
+  // (création des couvertures).
+  await pdfrxFlutterInitialize();
   final library = await Library.open();
   runApp(PdfApp(library: library));
+  // Synchro au lancement, sans bloquer l'affichage.
+  library.syncQuietly();
 }
 
 class PdfApp extends StatelessWidget {

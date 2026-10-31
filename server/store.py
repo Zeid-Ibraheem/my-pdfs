@@ -3,6 +3,7 @@
 Organisation du dossier de données :
     books/<empreinte SHA-256>.pdf   les livres
     catalog.db                      catalogue + index de recherche plein texte
+    covers/<empreinte>.png          couverture (page 1), créée avec pdftoppm
     backups/my_pdfs-AAAA-MM-JJ.db   sauvegardes de la base de l'appli (1 par jour)
     tmp/                            fichiers en cours de réception
 """
@@ -10,11 +11,13 @@ Organisation du dossier de données :
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import threading
 import time
 import uuid
@@ -41,7 +44,28 @@ CREATE VIRTUAL TABLE IF NOT EXISTS pages USING fts5(
     text,
     tokenize = 'unicode61 remove_diacritics 2'
 );
+-- État synchronisé entre les appareils / profils : page en cours,
+-- marque-pages, notes, catégories… Un élément = (type, clé). La version la
+-- plus récente (updated_at) gagne. seq numérote les changements reçus.
+CREATE TABLE IF NOT EXISTS state (
+    kind       TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    data       TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted    INTEGER NOT NULL DEFAULT 0,
+    seq        INTEGER NOT NULL,
+    PRIMARY KEY (kind, key)
+);
+CREATE INDEX IF NOT EXISTS state_by_seq ON state (seq);
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+STATE_KINDS = {"progress", "title", "bookmark", "category", "bookcat", "annotation"}
+STATE_PAGE = 2000
+MAX_ITEM_BYTES = 200_000
 
 SQLITE_HEADER = b"SQLite format 3\x00"
 
@@ -106,7 +130,8 @@ class Store:
         self.books_dir = data_dir / "books"
         self.tmp_dir = data_dir / "tmp"
         self.backups_dir = data_dir / "backups"
-        for folder in (self.books_dir, self.tmp_dir, self.backups_dir):
+        self.covers_dir = data_dir / "covers"
+        for folder in (self.books_dir, self.tmp_dir, self.backups_dir, self.covers_dir):
             folder.mkdir(parents=True, exist_ok=True)
         for leftover in self.tmp_dir.glob("*.part"):
             leftover.unlink(missing_ok=True)
@@ -117,7 +142,16 @@ class Store:
         self._db = sqlite3.connect(data_dir / "catalog.db", check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.executescript(SCHEMA)
+        # Identifiant de cette base d'état : s'il change (base recréée),
+        # l'appli renvoie tout ce qu'elle a au lieu de croire être à jour.
+        if self._db.execute("SELECT 1 FROM meta WHERE key = 'epoch'").fetchone() is None:
+            self._db.execute(
+                "INSERT INTO meta (key, value) VALUES ('epoch', ?)", (uuid.uuid4().hex,)
+            )
         self._db.commit()
+        self.epoch = self._db.execute(
+            "SELECT value FROM meta WHERE key = 'epoch'"
+        ).fetchone()[0]
 
     # ------------------------------------------------------------ catalogue
 
@@ -233,6 +267,7 @@ class Store:
             cursor = self._db.execute("DELETE FROM books WHERE id = ?", (book_id,))
             self._db.commit()
         self.path_of(book_id).unlink(missing_ok=True)
+        self.cover_of(book_id).unlink(missing_ok=True)
         if cursor.rowcount == 0:
             raise NotFound("Livre introuvable sur le serveur")
 
@@ -281,16 +316,52 @@ class Store:
             book_id[:12], len(rows), status, time.monotonic() - started,
         )
 
+    def process(self, book_id: str) -> None:
+        """Traitements après réception d'un livre : couverture puis texte."""
+        self.make_cover(book_id)
+        self.extract_text(book_id)
+
     def extract_pending(self) -> None:
+        """Au démarrage : termine les traitements interrompus."""
         with self._lock:
-            ids = [
+            pending = {
                 r[0]
                 for r in self._db.execute(
                     "SELECT id FROM books WHERE text_status = 'pending'"
                 ).fetchall()
-            ]
-        for book_id in ids:
-            self.extract_text(book_id)
+            }
+            all_ids = [r[0] for r in self._db.execute("SELECT id FROM books").fetchall()]
+        for book_id in all_ids:
+            if not self.cover_of(book_id).exists():
+                self.make_cover(book_id)
+            if book_id in pending:
+                self.extract_text(book_id)
+
+    # ---------------------------------------------------------- couvertures
+
+    def cover_of(self, book_id: str) -> Path:
+        return self.covers_dir / f"{book_id}.png"
+
+    def make_cover(self, book_id: str) -> bool:
+        """Image de la page 1 (300 px de large) avec pdftoppm (paquet
+        poppler-utils). Sans pdftoppm, l'appli affiche une icône à la place."""
+        source = self.path_of(book_id)
+        if not source.exists() or shutil.which("pdftoppm") is None:
+            return False
+        prefix = self.tmp_dir / f"cover-{uuid.uuid4().hex}"
+        produced = prefix.with_suffix(".png")
+        try:
+            subprocess.run(
+                ["pdftoppm", "-png", "-f", "1", "-l", "1", "-scale-to-x", "300",
+                 "-scale-to-y", "-1", "-singlefile", str(source), str(prefix)],
+                check=True, timeout=120, capture_output=True,
+            )
+            os.replace(produced, self.cover_of(book_id))
+            return True
+        except (subprocess.SubprocessError, OSError):
+            log.warning("Couverture impossible pour %s", book_id[:12])
+            produced.unlink(missing_ok=True)
+            return False
 
     def search(self, query: str, limit: int = 50) -> list[dict]:
         """Recherche plein texte, sans tenir compte des accents ni des majuscules.
@@ -311,6 +382,79 @@ class Store:
                 (match, limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------- état synchronisé
+
+    def sync_state(self, since: int, changes: list) -> dict:
+        """Reçoit les changements d'un appareil, garde pour chaque élément la
+        version la plus récente, et renvoie ce qui a changé depuis [since]."""
+        if not isinstance(changes, list):
+            raise StoreError("changes doit être une liste")
+        with self._lock:
+            (seq,) = self._db.execute("SELECT COALESCE(MAX(seq), 0) FROM state").fetchone()
+            for change in changes[:5000]:
+                item = self._valid_item(change)
+                current = self._db.execute(
+                    "SELECT updated_at FROM state WHERE kind = ? AND key = ?",
+                    (item["kind"], item["key"]),
+                ).fetchone()
+                if current is not None and current[0] >= item["updated_at"]:
+                    continue  # le serveur a déjà une version aussi récente
+                seq += 1
+                self._db.execute(
+                    "INSERT OR REPLACE INTO state (kind, key, data, updated_at, deleted, seq)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (item["kind"], item["key"], item["data"], item["updated_at"],
+                     1 if item["deleted"] else 0, seq),
+                )
+            self._db.commit()
+            rows = self._db.execute(
+                "SELECT kind, key, data, updated_at, deleted, seq FROM state"
+                " WHERE seq > ? ORDER BY seq LIMIT ?",
+                (max(0, int(since)), STATE_PAGE + 1),
+            ).fetchall()
+        more = len(rows) > STATE_PAGE
+        rows = rows[:STATE_PAGE]
+        return {
+            "epoch": self.epoch,
+            "seq": rows[-1]["seq"] if rows else max(0, int(since)),
+            "more": more,
+            "changes": [
+                {
+                    "kind": r["kind"],
+                    "key": r["key"],
+                    "data": json.loads(r["data"]),
+                    "updated_at": r["updated_at"],
+                    "deleted": bool(r["deleted"]),
+                }
+                for r in rows
+            ],
+        }
+
+    @staticmethod
+    def _valid_item(change) -> dict:
+        if not isinstance(change, dict):
+            raise StoreError("Élément de synchronisation invalide")
+        kind, key = change.get("kind"), change.get("key")
+        updated_at, data = change.get("updated_at"), change.get("data", {})
+        if kind not in STATE_KINDS:
+            raise StoreError(f"Type inconnu : {kind!r}")
+        if not isinstance(key, str) or not 0 < len(key) <= 300:
+            raise StoreError("Clé invalide")
+        if not isinstance(updated_at, int) or isinstance(updated_at, bool) or updated_at < 0:
+            raise StoreError("Date invalide")
+        if not isinstance(data, dict):
+            raise StoreError("Données invalides")
+        encoded = json.dumps(data, ensure_ascii=False)
+        if len(encoded.encode()) > MAX_ITEM_BYTES:
+            raise StoreError("Élément trop gros")
+        return {
+            "kind": kind,
+            "key": key,
+            "data": encoded,
+            "updated_at": updated_at,
+            "deleted": bool(change.get("deleted", False)),
+        }
 
     # ----------------------------------------------------------- sauvegardes
 

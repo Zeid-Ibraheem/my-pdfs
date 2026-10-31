@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../util/text.dart';
 import 'book.dart';
+import 'covers.dart';
 import 'database.dart';
 import 'server_api.dart';
 
@@ -59,10 +60,13 @@ class _Outcome {
 /// « <empreinte SHA-256>.pdf ». Le fichier d'origine n'est jamais modifié.
 /// Les écrans écoutent cet objet : il les prévient à chaque changement.
 class Library extends ChangeNotifier {
-  Library._(this._db, this.booksDir);
+  Library._(this._db, this.booksDir, this.covers);
 
   AppDatabase _db;
   final String booksDir;
+
+  /// Couvertures en images (voir covers.dart).
+  final CoverCache covers;
   ServerApi? _api;
   String? _serverUrl;
   String? _serverToken;
@@ -85,7 +89,8 @@ class Library extends ChangeNotifier {
     final dir = Directory(p.join(docs.path, 'livres'));
     await dir.create(recursive: true);
     await _cleanPartialFiles(dir);
-    final library = Library._(await AppDatabase.open(), dir.path);
+    final library = Library._(await AppDatabase.open(), dir.path,
+        CoverCache(p.join(docs.path, 'couvertures')));
     await library._loadServerConfig();
     await library._reconcileFiles();
     return library;
@@ -165,9 +170,90 @@ class Library extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Ajoute à la bibliothèque les livres présents sur le serveur et met à
+  Future<int>? _syncRunning;
+
+  /// Synchronise avec le serveur : liste des livres, puis état partagé
+  /// (pages, marque-pages, notes, catégories). Une seule synchro à la fois :
+  /// un second appel attend la première. Renvoie le nombre de nouveaux livres.
+  Future<int> syncWithServer() {
+    final running = _syncRunning;
+    if (running != null) return running;
+    final future = _syncAll();
+    _syncRunning = future;
+    return future.whenComplete(() => _syncRunning = null);
+  }
+
+  DateTime? _lastSyncAttempt;
+
+  /// Synchro silencieuse (retour dans l'appli, ouverture et fin de lecture) :
+  /// ne lève jamais d'erreur et ne prend jamais plus de [timeout]. Avec
+  /// [skipIfRecent], ne relance pas une synchro faite il y a moins longtemps
+  /// (mais attend celle en cours, s'il y en a une).
+  Future<void> syncQuietly({
+    Duration timeout = const Duration(seconds: 15),
+    Duration? skipIfRecent,
+  }) async {
+    if (!hasServer) return;
+    final last = _lastSyncAttempt;
+    if (_syncRunning == null &&
+        skipIfRecent != null &&
+        last != null &&
+        DateTime.now().difference(last) < skipIfRecent) {
+      return;
+    }
+    try {
+      await syncWithServer().timeout(timeout);
+    } catch (_) {
+      // Hors connexion ou serveur éteint : on réessaiera plus tard.
+    }
+  }
+
+  Future<int> _syncAll() async {
+    try {
+      final added = await _syncBooks();
+      await _syncState();
+      notifyListeners();
+      return added;
+    } finally {
+      _lastSyncAttempt = DateTime.now();
+    }
+  }
+
+  static const _kSyncSeq = 'synchro_seq';
+  static const _kSyncEpoch = 'synchro_epoch';
+
+  /// Échange l'état partagé avec le serveur, par paquets de 500.
+  Future<void> _syncState() async {
+    final api = _requireApi();
+    var since = int.tryParse(await _db.getSetting(_kSyncSeq) ?? '') ?? 0;
+    var epoch = await _db.getSetting(_kSyncEpoch);
+    for (var round = 0; round < 200; round++) {
+      final outgoing = await _db.dirtyItems();
+      final response =
+          await api.syncState(since: since, epoch: epoch, changes: outgoing);
+      if (epoch != null && response.epoch != epoch) {
+        // Base du serveur recréée : on lui renvoie tout ce qu'on a.
+        await _db.markAllDirty();
+        since = 0;
+        epoch = response.epoch;
+        await _db.setSetting(_kSyncEpoch, epoch);
+        await _db.setSetting(_kSyncSeq, '0');
+        continue;
+      }
+      await _db.markSent(outgoing);
+      await _db.applyRemote(response.changes);
+      since = response.seq;
+      epoch = response.epoch;
+      await _db.setSetting(_kSyncSeq, '$since');
+      await _db.setSetting(_kSyncEpoch, epoch);
+      if (!response.more && outgoing.length < 500) break;
+    }
+  }
+
+  /// Ajoute à la bibliothèque les livres présents sur le serveur, retire
+  /// ceux qui n'y sont plus (s'ils n'étaient pas sur le téléphone) et met à
   /// jour leur emplacement. Renvoie le nombre de nouveaux livres.
-  Future<int> syncWithServer() async {
+  Future<int> _syncBooks() async {
     final api = _requireApi();
     final remote = await api.books();
     final local = {for (final b in await _db.books()) b.id: b};
@@ -192,8 +278,15 @@ class Library extends ChangeNotifier {
         await _db.setPageCount(r.id, r.pageCount!);
       }
     }
-    await _db.applyServerIds({for (final r in remote) r.id});
-    notifyListeners();
+    final remoteIds = {for (final r in remote) r.id};
+    for (final book in local.values) {
+      // Supprimé du serveur (depuis l'autre profil) et absent du téléphone.
+      if (book.onServer && !book.onDevice && !remoteIds.contains(book.id)) {
+        await _db.deleteBook(book.id);
+        await covers.remove(book.id);
+      }
+    }
+    await _db.applyServerIds(remoteIds);
     return added;
   }
 
@@ -274,6 +367,7 @@ class Library extends ChangeNotifier {
     }
     await _db.deleteBook(book.id);
     await _deleteQuietly(File(pathOf(book)));
+    await covers.remove(book.id);
     notifyListeners();
   }
 

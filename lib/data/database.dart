@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
@@ -7,12 +8,10 @@ import '../util/text.dart';
 import 'annotation.dart';
 import 'book.dart';
 import 'category.dart';
+import 'sync_item.dart';
 
-/// Base SQLite locale : livres, marque-pages, catégories, annotations
-/// et réglages.
-///
-/// Tout tient dans un seul fichier (my_pdfs.db) : c'est lui qui est
-/// sauvegardé sur le serveur.
+/// Base SQLite locale : livres, marque-pages, catégories, annotations,
+/// réglages et état à synchroniser.
 ///
 /// Versions du schéma :
 /// 1. livres, marque-pages, réglages
@@ -20,6 +19,11 @@ import 'category.dart';
 /// 3. emplacement des livres (téléphone / serveur) et épinglage
 /// 4. table d'une ancienne option (import depuis Téléchargements), retirée ;
 ///    gardée pour qu'une base déjà mise à jour s'ouvre toujours
+/// 5. synchronisation entre profils : identifiants globaux des catégories et
+///    annotations, table sync_items (miroir de l'état du serveur)
+///
+/// Chaque modification synchronisable (page, marque-page, note, catégorie,
+/// titre) écrit aussi un élément dans sync_items, marqué « à envoyer ».
 class AppDatabase {
   AppDatabase._(this._db, this.path);
 
@@ -37,7 +41,7 @@ class AppDatabase {
     final path = await defaultPath();
     final db = await openDatabase(
       path,
-      version: 4,
+      version: 5,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
       },
@@ -46,6 +50,7 @@ class AppDatabase {
         await _createV2(db);
         await _createV3(db);
         await _createV4(db);
+        await _createV5(db);
       },
       // Mise à jour d'une appli déjà installée : on ajoute ce qui manque
       // sans toucher aux livres, marque-pages et annotations existants.
@@ -53,6 +58,7 @@ class AppDatabase {
         if (oldVersion < 2) await _createV2(db);
         if (oldVersion < 3) await _createV3(db);
         if (oldVersion < 4) await _createV4(db);
+        if (oldVersion < 5) await _createV5(db);
       },
     );
     return AppDatabase._(db, path);
@@ -71,6 +77,15 @@ class AppDatabase {
       await File(path).copy(dest);
     }
   }
+
+  static int _now() => DateTime.now().millisecondsSinceEpoch;
+
+  /// Clé d'une catégorie, identique sur tous les profils pour un même nom
+  /// (« Réseau » et « reseau » donnent la même catégorie).
+  static String categoryKey(String name) =>
+      normalizeForSearch(name.trim()).replaceAll(RegExp(r'\s+'), ' ');
+
+  // ---------------------------------------------------------------- Schéma
 
   static Future<void> _createV1(Database db) async {
     await db.execute('''
@@ -99,24 +114,6 @@ class AppDatabase {
         value TEXT NOT NULL
       )
     ''');
-  }
-
-  static Future<void> _createV4(Database db) async {
-    await db.execute('''
-      CREATE TABLE seen_downloads (
-        path      TEXT PRIMARY KEY,
-        signature TEXT NOT NULL
-      )
-    ''');
-  }
-
-  static Future<void> _createV3(Database db) async {
-    await db.execute(
-        'ALTER TABLE books ADD COLUMN on_device INTEGER NOT NULL DEFAULT 1');
-    await db.execute(
-        'ALTER TABLE books ADD COLUMN on_server INTEGER NOT NULL DEFAULT 0');
-    await db.execute(
-        'ALTER TABLE books ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
   }
 
   static Future<void> _createV2(Database db) async {
@@ -151,6 +148,157 @@ class AppDatabase {
         'CREATE INDEX annotations_by_book ON annotations (book_id, page)');
   }
 
+  static Future<void> _createV3(Database db) async {
+    await db.execute(
+        'ALTER TABLE books ADD COLUMN on_device INTEGER NOT NULL DEFAULT 1');
+    await db.execute(
+        'ALTER TABLE books ADD COLUMN on_server INTEGER NOT NULL DEFAULT 0');
+    await db.execute(
+        'ALTER TABLE books ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
+  }
+
+  static Future<void> _createV4(Database db) async {
+    await db.execute('''
+      CREATE TABLE seen_downloads (
+        path      TEXT PRIMARY KEY,
+        signature TEXT NOT NULL
+      )
+    ''');
+  }
+
+  /// Version 5 : prépare la synchronisation, puis enregistre tout l'état
+  /// existant comme « à envoyer » pour qu'il rejoigne celui des autres
+  /// profils à la première synchro (la version la plus récente gagne).
+  static Future<void> _createV5(Database db) async {
+    await db.execute('ALTER TABLE categories ADD COLUMN uid TEXT');
+    await db.execute('ALTER TABLE annotations ADD COLUMN uid TEXT');
+    await db.execute('''
+      CREATE TABLE sync_items (
+        kind       TEXT NOT NULL,
+        key        TEXT NOT NULL,
+        data       TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted    INTEGER NOT NULL DEFAULT 0,
+        dirty      INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (kind, key)
+      )
+    ''');
+    await db.execute('CREATE INDEX sync_items_dirty ON sync_items (dirty)');
+
+    // Catégories : clé tirée du nom ; deux catégories au même nom (accents
+    // ou majuscules près) sont fusionnées.
+    final byKey = <String, int>{};
+    for (final row in await db.query('categories', orderBy: 'id ASC')) {
+      final id = row['id'] as int;
+      final key = categoryKey(row['name'] as String);
+      final keep = byKey[key];
+      if (keep == null) {
+        byKey[key] = id;
+        await db.update('categories', {'uid': key},
+            where: 'id = ?', whereArgs: [id]);
+      } else {
+        await db.rawInsert(
+            'INSERT OR IGNORE INTO book_categories (book_id, category_id) '
+            'SELECT book_id, ? FROM book_categories WHERE category_id = ?',
+            [keep, id]);
+        await db.delete('book_categories',
+            where: 'category_id = ?', whereArgs: [id]);
+        await db.delete('categories', where: 'id = ?', whereArgs: [id]);
+      }
+    }
+    for (final row in await db.query('annotations', columns: ['id'])) {
+      await db.update('annotations', {'uid': newUid()},
+          where: 'id = ?', whereArgs: [row['id']]);
+    }
+    await db.execute('CREATE UNIQUE INDEX categories_uid ON categories (uid)');
+    await db.execute('CREATE UNIQUE INDEX annotations_uid ON annotations (uid)');
+
+    Future<void> seed(String kind, String key, Map<String, Object?> data,
+        int updatedAt) async {
+      await db.insert(
+          'sync_items',
+          {
+            'kind': kind,
+            'key': key,
+            'data': jsonEncode(data),
+            'updated_at': updatedAt,
+            'deleted': 0,
+            'dirty': 1,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace);
+    }
+
+    for (final row in await db.query('books')) {
+      final opened = row['last_opened_at'] as int?;
+      if (opened == null) continue; // jamais ouvert : rien à partager
+      await seed('progress', row['id'] as String,
+          {'page': row['last_page'], 'opened': opened}, opened);
+    }
+    for (final row in await db.query('bookmarks')) {
+      await seed('bookmark', '${row['book_id']}|${row['page']}', const {},
+          row['created_at'] as int);
+    }
+    final catCreated = <int, int>{};
+    for (final row in await db.query('categories')) {
+      catCreated[row['id'] as int] = row['created_at'] as int;
+      await seed('category', row['uid'] as String, {'name': row['name']},
+          row['created_at'] as int);
+    }
+    final catUid = {
+      for (final row in await db.query('categories'))
+        row['id'] as int: row['uid'] as String,
+    };
+    for (final row in await db.query('book_categories')) {
+      final categoryId = row['category_id'] as int;
+      final uid = catUid[categoryId];
+      if (uid == null) continue;
+      await seed('bookcat', '${row['book_id']}|$uid', const {},
+          catCreated[categoryId] ?? 1);
+    }
+    for (final row in await db.query('annotations')) {
+      await seed('annotation', row['uid'] as String, _annotationData(row),
+          row['updated_at'] as int);
+    }
+  }
+
+  static Map<String, Object?> _annotationData(Map<String, Object?> row) => {
+        'book_id': row['book_id'],
+        'page': row['page'],
+        'quote': row['quote'],
+        'rects': row['rects'],
+        'color': row['color'],
+        'note': row['note'],
+        'created_at': row['created_at'],
+      };
+
+  // ------------------------------------------------- Suivi des changements
+
+  /// Note une modification locale à envoyer au serveur.
+  Future<void> _record(
+    DatabaseExecutor ex,
+    String kind,
+    String key,
+    Map<String, Object?> data, {
+    bool deleted = false,
+  }) async {
+    await ex.insert(
+        'sync_items',
+        {
+          'kind': kind,
+          'key': key,
+          'data': jsonEncode(data),
+          'updated_at': _now(),
+          'deleted': deleted ? 1 : 0,
+          'dirty': 1,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<bool> _bookExists(DatabaseExecutor ex, String id) async =>
+      (await ex.query('books',
+              columns: ['id'], where: 'id = ?', whereArgs: [id], limit: 1))
+          .isNotEmpty;
+
   // ---------------------------------------------------------------- Livres
 
   /// Tous les livres (le tri se fait ensuite avec sortBooks).
@@ -165,15 +313,25 @@ class AppDatabase {
     return rows.isEmpty ? null : Book.fromRow(rows.first);
   }
 
+  /// Ajoute un livre, puis lui applique l'état déjà reçu des autres profils
+  /// (page en cours, notes, catégories…) pour ce même fichier.
   Future<void> insertBook(Book book) async {
-    await _db.insert('books', book.toRow());
+    await _db.transaction((txn) async {
+      await txn.insert('books', book.toRow());
+      await _reapplyForBook(txn, book.id);
+    });
   }
 
   Future<void> renameBook(String id, String title) async {
-    await _db.update('books', {'title': title},
-        where: 'id = ?', whereArgs: [id]);
+    await _db.transaction((txn) async {
+      await txn.update('books', {'title': title},
+          where: 'id = ?', whereArgs: [id]);
+      await _record(txn, 'title', id, {'title': title});
+    });
   }
 
+  /// Supprime le livre de ce profil. Son état synchronisé est gardé : si le
+  /// livre revient (réimport, serveur), il retrouve ses notes.
   Future<void> deleteBook(String id) async {
     await _db.transaction((txn) async {
       for (final table in ['bookmarks', 'book_categories', 'annotations']) {
@@ -188,9 +346,21 @@ class AppDatabase {
         where: 'id = ?', whereArgs: [id]);
   }
 
+  /// Enregistre la page en cours. Rien n'est envoyé si elle n'a pas changé :
+  /// ouvrir un livre sans bouger n'écrase pas la page lue sur l'autre profil.
   Future<void> saveLastPage(String id, int page) async {
-    await _db.update('books', {'last_page': page},
-        where: 'id = ?', whereArgs: [id]);
+    await _db.transaction((txn) async {
+      final rows = await txn.query('books',
+          columns: ['last_page', 'last_opened_at'],
+          where: 'id = ?',
+          whereArgs: [id],
+          limit: 1);
+      if (rows.isEmpty || rows.first['last_page'] == page) return;
+      await txn.update('books', {'last_page': page},
+          where: 'id = ?', whereArgs: [id]);
+      await _record(txn, 'progress', id,
+          {'page': page, 'opened': rows.first['last_opened_at'] ?? _now()});
+    });
   }
 
   Future<void> setOnDevice(String id, bool value) async {
@@ -214,7 +384,8 @@ class AppDatabase {
       await txn.rawUpdate('UPDATE books SET on_server = 0');
       final ids = serverIds.toList();
       for (var i = 0; i < ids.length; i += 400) {
-        final chunk = ids.sublist(i, i + 400 > ids.length ? ids.length : i + 400);
+        final chunk =
+            ids.sublist(i, i + 400 > ids.length ? ids.length : i + 400);
         final marks = List.filled(chunk.length, '?').join(', ');
         await txn.rawUpdate(
             'UPDATE books SET on_server = 1 WHERE id IN ($marks)', chunk);
@@ -223,8 +394,7 @@ class AppDatabase {
   }
 
   Future<void> markOpened(String id) async {
-    await _db.update(
-        'books', {'last_opened_at': DateTime.now().millisecondsSinceEpoch},
+    await _db.update('books', {'last_opened_at': _now()},
         where: 'id = ?', whereArgs: [id]);
   }
 
@@ -237,20 +407,23 @@ class AppDatabase {
   }
 
   Future<void> addBookmark(String bookId, int page) async {
-    await _db.insert(
-      'bookmarks',
-      {
-        'book_id': bookId,
-        'page': page,
-        'created_at': DateTime.now().millisecondsSinceEpoch,
-      },
-      conflictAlgorithm: ConflictAlgorithm.ignore,
-    );
+    await _db.transaction((txn) async {
+      await txn.insert(
+        'bookmarks',
+        {'book_id': bookId, 'page': page, 'created_at': _now()},
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+      await _record(txn, 'bookmark', '$bookId|$page', const {});
+    });
   }
 
   Future<void> removeBookmark(String bookId, int page) async {
-    await _db.delete('bookmarks',
-        where: 'book_id = ? AND page = ?', whereArgs: [bookId, page]);
+    await _db.transaction((txn) async {
+      await txn.delete('bookmarks',
+          where: 'book_id = ? AND page = ?', whereArgs: [bookId, page]);
+      await _record(txn, 'bookmark', '$bookId|$page', const {},
+          deleted: true);
+    });
   }
 
   // ------------------------------------------------------------ Catégories
@@ -263,38 +436,77 @@ class AppDatabase {
     return list;
   }
 
-  Future<BookCategory?> _categoryByName(String name) async {
-    final rows = await _db.query('categories',
-        where: 'name = ? COLLATE NOCASE', whereArgs: [name], limit: 1);
-    return rows.isEmpty ? null : BookCategory.fromRow(rows.first);
+  Future<Map<String, Object?>?> _categoryRowByKey(
+      DatabaseExecutor ex, String key) async {
+    final rows = await ex.query('categories',
+        where: 'uid = ?', whereArgs: [key], limit: 1);
+    return rows.isEmpty ? null : rows.first;
+  }
+
+  Future<String?> _categoryKeyOf(DatabaseExecutor ex, int id) async {
+    final rows = await ex.query('categories',
+        columns: ['uid'], where: 'id = ?', whereArgs: [id], limit: 1);
+    return rows.isEmpty ? null : rows.first['uid'] as String?;
   }
 
   /// Crée la catégorie, ou renvoie celle qui porte déjà ce nom.
   Future<BookCategory> createCategory(String name) async {
-    final existing = await _categoryByName(name);
-    if (existing != null) return existing;
-    final id = await _db.insert('categories', {
-      'name': name,
-      'created_at': DateTime.now().millisecondsSinceEpoch,
+    final key = categoryKey(name);
+    return _db.transaction((txn) async {
+      final existing = await _categoryRowByKey(txn, key);
+      if (existing != null) return BookCategory.fromRow(existing);
+      final id = await txn.insert('categories', {
+        'name': name,
+        'uid': key,
+        'created_at': _now(),
+      });
+      await _record(txn, 'category', key, {'name': name});
+      return BookCategory(id: id, name: name);
     });
-    return BookCategory(id: id, name: name);
   }
 
   /// Renvoie `false` si une autre catégorie porte déjà ce nom.
   Future<bool> renameCategory(int id, String name) async {
-    final existing = await _categoryByName(name);
-    if (existing != null && existing.id != id) return false;
-    await _db.update('categories', {'name': name},
-        where: 'id = ?', whereArgs: [id]);
-    return true;
+    final newKey = categoryKey(name);
+    return _db.transaction((txn) async {
+      final existing = await _categoryRowByKey(txn, newKey);
+      if (existing != null && existing['id'] != id) return false;
+      final oldKey = await _categoryKeyOf(txn, id);
+      if (oldKey == null) return false;
+      await txn.update('categories', {'name': name, 'uid': newKey},
+          where: 'id = ?', whereArgs: [id]);
+      await _record(txn, 'category', newKey, {'name': name});
+      if (oldKey != newKey) {
+        // La clé suit le nom : on déplace aussi les rangements des livres.
+        await _record(txn, 'category', oldKey, const {}, deleted: true);
+        final links = await txn.query('book_categories',
+            columns: ['book_id'], where: 'category_id = ?', whereArgs: [id]);
+        for (final link in links) {
+          final bookId = link['book_id'] as String;
+          await _record(txn, 'bookcat', '$bookId|$oldKey', const {},
+              deleted: true);
+          await _record(txn, 'bookcat', '$bookId|$newKey', const {});
+        }
+      }
+      return true;
+    });
   }
 
   /// Supprime la catégorie. Les livres, eux, restent dans la bibliothèque.
   Future<void> deleteCategory(int id) async {
     await _db.transaction((txn) async {
+      final key = await _categoryKeyOf(txn, id);
+      final links = await txn.query('book_categories',
+          columns: ['book_id'], where: 'category_id = ?', whereArgs: [id]);
       await txn.delete('book_categories',
           where: 'category_id = ?', whereArgs: [id]);
       await txn.delete('categories', where: 'id = ?', whereArgs: [id]);
+      if (key == null) return;
+      await _record(txn, 'category', key, const {}, deleted: true);
+      for (final link in links) {
+        await _record(txn, 'bookcat', '${link['book_id']}|$key', const {},
+            deleted: true);
+      }
     });
   }
 
@@ -312,22 +524,40 @@ class AppDatabase {
 
   Future<void> setBookCategories(String bookId, Set<int> categoryIds) async {
     await _db.transaction((txn) async {
-      await txn.delete('book_categories',
-          where: 'book_id = ?', whereArgs: [bookId]);
-      for (final id in categoryIds) {
+      final before = {
+        for (final row in await txn.query('book_categories',
+            columns: ['category_id'],
+            where: 'book_id = ?',
+            whereArgs: [bookId]))
+          row['category_id'] as int,
+      };
+      for (final id in before.difference(categoryIds)) {
+        await txn.delete('book_categories',
+            where: 'book_id = ? AND category_id = ?', whereArgs: [bookId, id]);
+        final key = await _categoryKeyOf(txn, id);
+        if (key != null) {
+          await _record(txn, 'bookcat', '$bookId|$key', const {},
+              deleted: true);
+        }
+      }
+      for (final id in categoryIds.difference(before)) {
         await txn.insert(
             'book_categories', {'book_id': bookId, 'category_id': id},
             conflictAlgorithm: ConflictAlgorithm.ignore);
+        final key = await _categoryKeyOf(txn, id);
+        if (key != null) await _record(txn, 'bookcat', '$bookId|$key', const {});
       }
     });
   }
 
   Future<void> addBooksToCategory(List<String> bookIds, int categoryId) async {
     await _db.transaction((txn) async {
+      final key = await _categoryKeyOf(txn, categoryId);
       for (final bookId in bookIds) {
         await txn.insert(
             'book_categories', {'book_id': bookId, 'category_id': categoryId},
             conflictAlgorithm: ConflictAlgorithm.ignore);
+        if (key != null) await _record(txn, 'bookcat', '$bookId|$key', const {});
       }
     });
   }
@@ -343,22 +573,40 @@ class AppDatabase {
   }
 
   /// Enregistre l'annotation et renvoie son identifiant.
-  Future<int> insertAnnotation(Annotation annotation) =>
-      _db.insert('annotations', annotation.toRow());
+  Future<int> insertAnnotation(Annotation annotation) async {
+    return _db.transaction((txn) async {
+      final row = {...annotation.toRow(), 'uid': newUid()}..remove('id');
+      final id = await txn.insert('annotations', row);
+      await _record(txn, 'annotation', row['uid'] as String,
+          _annotationData(row));
+      return id;
+    });
+  }
 
   Future<void> updateAnnotationNote(int id, String note) async {
-    await _db.update(
-        'annotations',
-        {
-          'note': note,
-          'updated_at': DateTime.now().millisecondsSinceEpoch,
-        },
-        where: 'id = ?',
-        whereArgs: [id]);
+    await _db.transaction((txn) async {
+      await txn.update('annotations', {'note': note, 'updated_at': _now()},
+          where: 'id = ?', whereArgs: [id]);
+      final rows = await txn.query('annotations',
+          where: 'id = ?', whereArgs: [id], limit: 1);
+      if (rows.isEmpty) return;
+      final uid = rows.first['uid'] as String?;
+      if (uid != null) {
+        await _record(txn, 'annotation', uid, _annotationData(rows.first));
+      }
+    });
   }
 
   Future<void> deleteAnnotation(int id) async {
-    await _db.delete('annotations', where: 'id = ?', whereArgs: [id]);
+    await _db.transaction((txn) async {
+      final rows = await txn.query('annotations',
+          columns: ['uid'], where: 'id = ?', whereArgs: [id], limit: 1);
+      await txn.delete('annotations', where: 'id = ?', whereArgs: [id]);
+      final uid = rows.isEmpty ? null : rows.first['uid'] as String?;
+      if (uid != null) {
+        await _record(txn, 'annotation', uid, const {}, deleted: true);
+      }
+    });
   }
 
   /// Nombre d'annotations par livre (affiché dans la bibliothèque).
@@ -368,6 +616,189 @@ class AppDatabase {
     return {
       for (final row in rows) row['book_id'] as String: row['n'] as int,
     };
+  }
+
+  // ------------------------------------------------------- Synchronisation
+
+  /// Changements locaux pas encore envoyés.
+  Future<List<SyncItem>> dirtyItems({int limit = 500}) async {
+    final rows = await _db.query('sync_items',
+        where: 'dirty = 1', orderBy: 'updated_at ASC', limit: limit);
+    return rows.map(SyncItem.fromRow).toList();
+  }
+
+  /// Marque comme envoyés les éléments [sent], sauf ceux modifiés entre-temps.
+  Future<void> markSent(List<SyncItem> sent) async {
+    await _db.transaction((txn) async {
+      for (final item in sent) {
+        await txn.update('sync_items', {'dirty': 0},
+            where: 'kind = ? AND key = ? AND updated_at = ?',
+            whereArgs: [item.kind, item.key, item.updatedAt]);
+      }
+    });
+  }
+
+  /// Tout renvoyer (le serveur a été réinitialisé).
+  Future<void> markAllDirty() async {
+    await _db.rawUpdate('UPDATE sync_items SET dirty = 1');
+  }
+
+  /// Applique les changements reçus du serveur quand ils sont plus récents
+  /// que la version locale. Renvoie le nombre de changements appliqués.
+  Future<int> applyRemote(List<SyncItem> items) async {
+    final sorted = [...items]..sort((a, b) => a.applyOrder - b.applyOrder);
+    var applied = 0;
+    await _db.transaction((txn) async {
+      for (final item in sorted) {
+        final local = await txn.query('sync_items',
+            columns: ['updated_at'],
+            where: 'kind = ? AND key = ?',
+            whereArgs: [item.kind, item.key],
+            limit: 1);
+        if (local.isNotEmpty &&
+            (local.first['updated_at'] as int) >= item.updatedAt) {
+          continue; // la version locale est aussi récente ou plus récente
+        }
+        await txn.insert(
+            'sync_items',
+            {
+              'kind': item.kind,
+              'key': item.key,
+              'data': jsonEncode(item.data),
+              'updated_at': item.updatedAt,
+              'deleted': item.deleted ? 1 : 0,
+              'dirty': 0,
+            },
+            conflictAlgorithm: ConflictAlgorithm.replace);
+        try {
+          await _apply(txn, item);
+        } catch (_) {
+          // Élément inattendu : on le garde en réserve sans bloquer le reste.
+        }
+        applied++;
+      }
+    });
+    return applied;
+  }
+
+  /// Réapplique l'état déjà reçu pour un livre qui vient d'arriver.
+  Future<void> _reapplyForBook(DatabaseExecutor ex, String bookId) async {
+    final rows = await ex.query('sync_items',
+        where: "(kind IN ('progress', 'title') AND key = ?) "
+            "OR (kind IN ('bookmark', 'bookcat') AND key LIKE ?) "
+            "OR (kind = 'annotation' AND data LIKE ?)",
+        whereArgs: [bookId, '$bookId|%', '%$bookId%']);
+    final items = rows.map(SyncItem.fromRow).toList()
+      ..sort((a, b) => a.applyOrder - b.applyOrder);
+    for (final item in items) {
+      try {
+        await _apply(ex, item);
+      } catch (_) {
+        // Élément inattendu : ignoré, le livre s'ajoute quand même.
+      }
+    }
+  }
+
+  /// Traduit un élément synchronisé dans les tables de l'appli.
+  /// Un élément qui vise un livre absent de ce profil est simplement gardé
+  /// dans sync_items : il sera appliqué si le livre arrive.
+  Future<void> _apply(DatabaseExecutor ex, SyncItem item) async {
+    final data = item.data;
+    switch (item.kind) {
+      case 'progress':
+        final page = jsonInt(data['page']);
+        if (page == null || !await _bookExists(ex, item.key)) return;
+        await ex.update(
+            'books',
+            {
+              'last_page': page < 1 ? 1 : page,
+              'last_opened_at': jsonInt(data['opened']) ?? item.updatedAt,
+            },
+            where: 'id = ?',
+            whereArgs: [item.key]);
+      case 'title':
+        final title = data['title'];
+        if (title is! String || title.trim().isEmpty) return;
+        await ex.update('books', {'title': title},
+            where: 'id = ?', whereArgs: [item.key]);
+      case 'bookmark':
+        final parts = item.key.split('|');
+        final markPage = parts.length == 2 ? int.tryParse(parts[1]) : null;
+        if (markPage == null) return;
+        if (item.deleted) {
+          await ex.delete('bookmarks',
+              where: 'book_id = ? AND page = ?',
+              whereArgs: [parts[0], markPage]);
+        } else if (await _bookExists(ex, parts[0])) {
+          await ex.insert(
+              'bookmarks',
+              {
+                'book_id': parts[0],
+                'page': markPage,
+                'created_at': item.updatedAt,
+              },
+              conflictAlgorithm: ConflictAlgorithm.ignore);
+        }
+      case 'category':
+        final existing = await _categoryRowByKey(ex, item.key);
+        if (item.deleted) {
+          if (existing == null) return;
+          await ex.delete('book_categories',
+              where: 'category_id = ?', whereArgs: [existing['id']]);
+          await ex.delete('categories',
+              where: 'id = ?', whereArgs: [existing['id']]);
+          return;
+        }
+        final name = data['name'];
+        if (name is! String || name.trim().isEmpty) return;
+        if (existing == null) {
+          await ex.insert('categories',
+              {'name': name, 'uid': item.key, 'created_at': item.updatedAt});
+        } else {
+          await ex.update('categories', {'name': name},
+              where: 'id = ?', whereArgs: [existing['id']]);
+        }
+      case 'bookcat':
+        final cut = item.key.indexOf('|');
+        if (cut <= 0) return;
+        final linkBook = item.key.substring(0, cut);
+        final category =
+            await _categoryRowByKey(ex, item.key.substring(cut + 1));
+        if (category == null) return;
+        if (item.deleted) {
+          await ex.delete('book_categories',
+              where: 'book_id = ? AND category_id = ?',
+              whereArgs: [linkBook, category['id']]);
+        } else if (await _bookExists(ex, linkBook)) {
+          await ex.insert('book_categories',
+              {'book_id': linkBook, 'category_id': category['id']},
+              conflictAlgorithm: ConflictAlgorithm.ignore);
+        }
+      case 'annotation':
+        if (item.deleted) {
+          await ex.delete('annotations',
+              where: 'uid = ?', whereArgs: [item.key]);
+          return;
+        }
+        final noteBook = data['book_id'];
+        final notePage = jsonInt(data['page']);
+        if (noteBook is! String || notePage == null) return;
+        if (!await _bookExists(ex, noteBook)) return;
+        final row = <String, Object?>{
+          'book_id': noteBook,
+          'page': notePage,
+          'quote': data['quote'] is String ? data['quote'] : null,
+          'rects': data['rects'] is String ? data['rects'] : null,
+          'color': jsonInt(data['color']),
+          'note': data['note'] is String ? data['note'] : '',
+          'created_at': jsonInt(data['created_at']) ?? item.updatedAt,
+          'updated_at': item.updatedAt,
+          'uid': item.key,
+        };
+        final updated = await ex.update('annotations', row,
+            where: 'uid = ?', whereArgs: [item.key]);
+        if (updated == 0) await ex.insert('annotations', row);
+    }
   }
 
   // -------------------------------------------------------------- Réglages

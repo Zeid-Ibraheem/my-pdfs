@@ -114,11 +114,22 @@ Future<void> openBook(
       return;
     }
   }
+  // Récupère d'abord la page lue sur l'autre profil (3 s maximum : hors
+  // connexion, on ouvre quand même tout de suite).
+  await library.syncQuietly(
+    timeout: const Duration(seconds: 3),
+    skipIfRecent: const Duration(seconds: 20),
+  );
+  if (!context.mounted) return;
+  final fresh = await library.db.book(book.id) ?? book;
+  if (!context.mounted) return;
   await Navigator.of(context).push(
     MaterialPageRoute<void>(
-      builder: (_) => ReaderScreen(library: library, book: book, initialPage: page),
+      builder: (_) =>
+          ReaderScreen(library: library, book: fresh, initialPage: page),
     ),
   );
   library.refresh(); // progression, notes… ont pu changer
-  unawaited(library.autoBackup());
+  // Partage tout de suite la page et les notes avec l'autre profil.
+  unawaited(library.syncQuietly().then((_) => library.autoBackup()));
 }

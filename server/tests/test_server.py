@@ -218,6 +218,61 @@ class ServerTest(unittest.TestCase):
         r = requests.put(self.url("/api/backup"), data=b"nimporte", headers=AUTH, timeout=5)
         self.assertEqual(r.status_code, 400)
 
+    def post_state(self, since=0, changes=(), epoch=None):
+        r = requests.post(self.url("/api/state"), headers=AUTH, timeout=5,
+                          json={"since": since, "epoch": epoch, "changes": list(changes)})
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()
+
+    def test_state_sync_between_two_profiles(self):
+        a = self.post_state(changes=[
+            {"kind": "progress", "key": "b1", "data": {"page": 50}, "updated_at": 2000},
+            {"kind": "bookmark", "key": "b1|12", "data": {}, "updated_at": 2000},
+        ])
+        since_a = a["seq"]
+        # Profil B : une page plus ancienne (perd) et un marque-page supprimé (gagne).
+        b = self.post_state(changes=[
+            {"kind": "progress", "key": "b1", "data": {"page": 10}, "updated_at": 1000},
+            {"kind": "bookmark", "key": "b1|12", "data": {}, "updated_at": 3000,
+             "deleted": True},
+        ])
+        state = {(c["kind"], c["key"]): c for c in b["changes"]}
+        self.assertEqual(state[("progress", "b1")]["data"], {"page": 50})
+        self.assertTrue(state[("bookmark", "b1|12")]["deleted"])
+        # Le profil A ne reçoit que ce qui a changé depuis sa dernière synchro.
+        again = self.post_state(since=since_a, epoch=a["epoch"])
+        self.assertEqual([(c["kind"], c["key"]) for c in again["changes"]],
+                         [("bookmark", "b1|12")])
+        # Égalité de date : le serveur garde sa version.
+        tie = self.post_state(since=b["seq"], changes=[
+            {"kind": "progress", "key": "b1", "data": {"page": 99}, "updated_at": 2000}])
+        self.assertEqual(tie["changes"], [])
+
+    def test_state_epoch_reset_and_validation(self):
+        self.post_state(changes=[
+            {"kind": "title", "key": "zz", "data": {"title": "T"}, "updated_at": 5}])
+        everything = self.post_state(since=10**9, epoch="ancienne-base")
+        self.assertTrue(any(c["key"] == "zz" for c in everything["changes"]))
+        for bad in ({"kind": "pirate", "key": "x", "updated_at": 1},
+                    {"kind": "title", "key": "", "updated_at": 1},
+                    {"kind": "title", "key": "x", "updated_at": "hier"}):
+            r = requests.post(self.url("/api/state"), headers=AUTH, timeout=5,
+                              json={"since": 0, "changes": [bad]})
+            self.assertEqual(r.status_code, 400)
+
+    def test_cover(self):
+        import shutil as _sh
+        pdf = make_pdf(["Couverture"])
+        self.upload(pdf, title="Avec couverture")
+        book_id = sha(pdf)
+        self.wait_text(book_id)
+        r = requests.get(self.url(f"/api/books/{book_id}/cover"), headers=AUTH, timeout=5)
+        if _sh.which("pdftoppm"):
+            self.assertEqual(r.status_code, 200)
+            self.assertTrue(r.content.startswith(b"\x89PNG"))
+        else:
+            self.assertEqual(r.status_code, 404)
+
     def test_discover_rejects_other_sources(self):
         r = requests.post(
             self.url("/api/discover/import"),

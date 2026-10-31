@@ -1,7 +1,10 @@
+import 'dart:io';
+
 import 'package:material_ui/material_ui.dart';
-import 'package:pdfrx/pdfrx.dart';
 
 import '../data/book.dart';
+import '../data/covers.dart';
+import '../data/server_api.dart';
 import '../util/text.dart';
 
 /// Une ligne de la bibliothèque : couverture, titre, progression,
@@ -11,6 +14,8 @@ class BookTile extends StatelessWidget {
     super.key,
     required this.book,
     required this.filePath,
+    required this.covers,
+    this.api,
     this.categoryNames = const [],
     this.annotationCount = 0,
     this.serverConfigured = false,
@@ -21,6 +26,8 @@ class BookTile extends StatelessWidget {
 
   final Book book;
   final String filePath;
+  final CoverCache covers;
+  final ServerApi? api;
   final List<String> categoryNames;
   final int annotationCount;
   final bool serverConfigured;
@@ -43,7 +50,7 @@ class BookTile extends StatelessWidget {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _Cover(book: book, filePath: filePath),
+            _Cover(book: book, filePath: filePath, covers: covers, api: api),
             const SizedBox(width: 14),
             Expanded(
               child: Column(
@@ -154,20 +161,59 @@ class BookTile extends StatelessWidget {
   }
 }
 
-/// Miniature de la page 1, rendue en basse résolution.
-class _Cover extends StatelessWidget {
-  const _Cover({required this.book, required this.filePath});
+/// Couverture : image enregistrée une fois (voir data/covers.dart).
+/// Aucun PDF n'est ouvert ici, donc rien à recharger au retour du lecteur.
+class _Cover extends StatefulWidget {
+  const _Cover({
+    required this.book,
+    required this.filePath,
+    required this.covers,
+    this.api,
+  });
 
   final Book book;
   final String filePath;
+  final CoverCache covers;
+  final ServerApi? api;
+
+  @override
+  State<_Cover> createState() => _CoverState();
+}
+
+class _CoverState extends State<_Cover> {
+  File? _file;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(_Cover old) {
+    super.didUpdateWidget(old);
+    final changed = old.book.id != widget.book.id ||
+        old.book.onDevice != widget.book.onDevice;
+    if (changed && _file == null) _load();
+  }
+
+  void _load() {
+    final ready = widget.covers.existing(widget.book.id);
+    if (ready != null) {
+      _file = ready;
+      return;
+    }
+    widget.covers
+        .request(widget.book, pdfPath: widget.filePath, api: widget.api)
+        .then((file) {
+      if (mounted && file != null) setState(() => _file = file);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final placeholder = Icon(
-      book.onDevice ? Icons.picture_as_pdf_outlined : Icons.cloud_outlined,
-      color: colors.onSurfaceVariant,
-    );
+    final file = _file;
     return SizedBox(
       width: 52,
       height: 72,
@@ -175,18 +221,22 @@ class _Cover extends StatelessWidget {
         borderRadius: BorderRadius.circular(4),
         child: ColoredBox(
           color: colors.surfaceContainerHighest,
-          child: !book.onDevice
-              ? placeholder
-              : PdfDocumentViewBuilder.file(
-                  filePath,
-                  key: ValueKey('${book.id}-cover'),
-                  builder: (context, document) => document == null
-                      ? placeholder
-                      : PdfPageView(
-                          document: document,
-                          pageNumber: 1,
-                          maximumDpi: 72,
-                        ),
+          child: file == null
+              ? Icon(
+                  widget.book.onDevice
+                      ? Icons.picture_as_pdf_outlined
+                      : Icons.cloud_outlined,
+                  color: colors.onSurfaceVariant,
+                )
+              : Image.file(
+                  file,
+                  fit: BoxFit.cover,
+                  cacheWidth: 156, // 52 px × 3 (écran haute densité)
+                  gaplessPlayback: true,
+                  errorBuilder: (context, error, stack) => Icon(
+                    Icons.picture_as_pdf_outlined,
+                    color: colors.onSurfaceVariant,
+                  ),
                 ),
         ),
       ),
