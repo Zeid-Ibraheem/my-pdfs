@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 """
 
-STATE_KINDS = {"progress", "title", "bookmark", "category", "bookcat", "annotation"}
+STATE_KINDS = {"progress", "title", "bookmark", "category", "bookcat", "annotation", "readlog"}
 STATE_PAGE = 2000
 MAX_ITEM_BYTES = 200_000
 

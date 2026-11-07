@@ -248,6 +248,13 @@ class ServerTest(unittest.TestCase):
             {"kind": "progress", "key": "b1", "data": {"page": 99}, "updated_at": 2000}])
         self.assertEqual(tie["changes"], [])
 
+    def test_reading_log_synced(self):
+        log = self.post_state(changes=[{"kind": "readlog", "key": "book:rl1",
+                                        "data": {"title": "Livre", "rating": 4},
+                                        "updated_at": 4000}])
+        mine = [c for c in log["changes"] if c["key"] == "book:rl1"]
+        self.assertEqual(mine[0]["data"]["rating"], 4)
+
     def test_state_epoch_reset_and_validation(self):
         self.post_state(changes=[
             {"kind": "title", "key": "zz", "data": {"title": "T"}, "updated_at": 5}])

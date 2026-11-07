@@ -3,6 +3,7 @@ import 'package:material_ui/material_ui.dart';
 import '../data/library.dart';
 import 'discover_screen.dart';
 import 'library_screen.dart';
+import 'reading_log_screen.dart';
 import 'search_screen.dart';
 import 'settings_screen.dart';
 
@@ -33,6 +34,7 @@ class _HomeScreenState extends State<HomeScreen> {
           index: _tab,
           children: [
             LibraryScreen(library: widget.library),
+            ReadingLogScreen(library: widget.library),
             SearchScreen(library: widget.library),
             DiscoverScreen(library: widget.library),
             SettingsScreen(library: widget.library),
@@ -46,6 +48,11 @@ class _HomeScreenState extends State<HomeScreen> {
               icon: Icon(Icons.menu_book_outlined),
               selectedIcon: Icon(Icons.menu_book),
               label: 'Bibliothèque',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.auto_stories_outlined),
+              selectedIcon: Icon(Icons.auto_stories),
+              label: 'Lectures',
             ),
             NavigationDestination(
               icon: Icon(Icons.manage_search),

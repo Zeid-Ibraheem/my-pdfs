@@ -5,7 +5,7 @@ import '../data/server_api.dart';
 import '../util/text.dart';
 import 'common.dart';
 
-const appVersion = '0.5.1';
+const appVersion = '0.6.0';
 
 /// Onglet Réglages : connexion au serveur, place sur le téléphone,
 /// sauvegarde des notes et de la progression.
@@ -198,8 +198,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               children: [
                 Text(
                   'Seront supprimés, sans retour possible :\n'
-                  '• notes, surlignages, marque-pages, catégories et pages '
-                  'en cours, sur ce téléphone et sur le serveur ;\n'
+                  '• notes, surlignages, marque-pages, catégories, pages '
+                  'en cours et carnet de lectures, sur ce téléphone et sur '
+                  'le serveur ;\n'
                   '• toutes les sauvegardes du serveur ;\n'
                   '• les fichiers temporaires de l’appli.\n\n'
                   '${_lib.hasServer ? 'Ton autre profil effacera aussi les siens à sa prochaine synchro.' : 'Aucun serveur configuré : seul ce téléphone est concerné.'}',

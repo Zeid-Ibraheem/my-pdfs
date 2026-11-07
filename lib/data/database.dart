@@ -8,6 +8,7 @@ import '../util/text.dart';
 import 'annotation.dart';
 import 'book.dart';
 import 'category.dart';
+import 'reading_entry.dart';
 import 'sync_item.dart';
 
 /// Base SQLite locale : livres, marque-pages, catégories, annotations,
@@ -21,6 +22,7 @@ import 'sync_item.dart';
 ///    gardée pour qu'une base déjà mise à jour s'ouvre toujours
 /// 5. synchronisation entre profils : identifiants globaux des catégories et
 ///    annotations, table sync_items (miroir de l'état du serveur)
+/// 6. carnet de lectures (livres lus, en cours, à lire, avec note et avis)
 ///
 /// Chaque modification synchronisable (page, marque-page, note, catégorie,
 /// titre) écrit aussi un élément dans sync_items, marqué « à envoyer ».
@@ -41,7 +43,7 @@ class AppDatabase {
     final path = await defaultPath();
     final db = await openDatabase(
       path,
-      version: 5,
+      version: 6,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
       },
@@ -51,6 +53,7 @@ class AppDatabase {
         await _createV3(db);
         await _createV4(db);
         await _createV5(db);
+        await _createV6(db);
       },
       // Mise à jour d'une appli déjà installée : on ajoute ce qui manque
       // sans toucher aux livres, marque-pages et annotations existants.
@@ -59,6 +62,7 @@ class AppDatabase {
         if (oldVersion < 3) await _createV3(db);
         if (oldVersion < 4) await _createV4(db);
         if (oldVersion < 5) await _createV5(db);
+        if (oldVersion < 6) await _createV6(db);
       },
     );
     return AppDatabase._(db, path);
@@ -261,6 +265,72 @@ class AppDatabase {
     }
   }
 
+  /// Version 6 : carnet de lectures. Chaque livre déjà présent y entre
+  /// automatiquement, avec un statut déduit de sa progression.
+  static Future<void> _createV6(Database db) async {
+    await db.execute('''
+      CREATE TABLE reading_list (
+        uid         TEXT PRIMARY KEY,
+        title       TEXT NOT NULL,
+        author      TEXT NOT NULL DEFAULT '',
+        rating      INTEGER NOT NULL DEFAULT 0,
+        review      TEXT NOT NULL DEFAULT '',
+        status      TEXT NOT NULL DEFAULT 'toread',
+        finished_at INTEGER,
+        book_id     TEXT,
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL
+      )
+    ''');
+    for (final row in await db.query('books')) {
+      final book = Book.fromRow(row);
+      final status = book.finished
+          ? ReadingStatus.read
+          : book.started
+              ? ReadingStatus.reading
+              : ReadingStatus.toRead;
+      await _autoEntry(db, book, status);
+    }
+  }
+
+  /// Entrée automatique d'un livre importé. Datée de 1 (la plus ancienne
+  /// possible) : toute vraie modification, sur n'importe quel profil, gagne
+  /// contre elle à la synchro. N'écrase jamais une entrée existante ni une
+  /// entrée supprimée volontairement.
+  static Future<void> _autoEntry(
+      DatabaseExecutor ex, Book book, ReadingStatus status) async {
+    final key = ReadingEntry.keyForBook(book.id);
+    final known = await ex.query('sync_items',
+        columns: ['kind'],
+        where: "kind = 'readlog' AND key = ?",
+        whereArgs: [key],
+        limit: 1);
+    final exists = await ex.query('reading_list',
+        columns: ['uid'], where: 'uid = ?', whereArgs: [key], limit: 1);
+    if (known.isNotEmpty || exists.isNotEmpty) return;
+    final entry = ReadingEntry(
+      uid: key,
+      title: book.title,
+      status: status,
+      finishedAt: status == ReadingStatus.read ? book.lastOpenedAt : null,
+      bookId: book.id,
+      createdAt: book.addedAt,
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(1),
+    );
+    await ex.insert('reading_list', entry.toRow());
+    await ex.insert(
+        'sync_items',
+        {
+          'kind': 'readlog',
+          'key': key,
+          'data': jsonEncode(entry.toRow()),
+          'updated_at': 1,
+          'deleted': 0,
+          'dirty': 1,
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore);
+  }
+
   static Map<String, Object?> _annotationData(Map<String, Object?> row) => {
         'book_id': row['book_id'],
         'page': row['page'],
@@ -319,6 +389,7 @@ class AppDatabase {
     await _db.transaction((txn) async {
       await txn.insert('books', book.toRow());
       await _reapplyForBook(txn, book.id);
+      await _autoEntry(txn, book, ReadingStatus.toRead);
     });
   }
 
@@ -327,6 +398,13 @@ class AppDatabase {
       await txn.update('books', {'title': title},
           where: 'id = ?', whereArgs: [id]);
       await _record(txn, 'title', id, {'title': title});
+      // Le titre suit dans le carnet de lectures.
+      final rows = await txn.query('reading_list',
+          where: 'uid = ?', whereArgs: [ReadingEntry.keyForBook(id)], limit: 1);
+      if (rows.isNotEmpty) {
+        await _writeEntry(
+            txn, ReadingEntry.fromRow(rows.first).copyWith(title: title));
+      }
     });
   }
 
@@ -351,7 +429,7 @@ class AppDatabase {
   Future<void> saveLastPage(String id, int page) async {
     await _db.transaction((txn) async {
       final rows = await txn.query('books',
-          columns: ['last_page', 'last_opened_at'],
+          columns: ['last_page', 'last_opened_at', 'page_count'],
           where: 'id = ?',
           whereArgs: [id],
           limit: 1);
@@ -360,6 +438,11 @@ class AppDatabase {
           where: 'id = ?', whereArgs: [id]);
       await _record(txn, 'progress', id,
           {'page': page, 'opened': rows.first['last_opened_at'] ?? _now()});
+      // Dernière page atteinte : le livre passe en « Lu » dans le carnet.
+      final count = rows.first['page_count'] as int?;
+      if (count != null && count > 0 && page >= count) {
+        await _setEntryStatus(txn, id, ReadingStatus.read);
+      }
     });
   }
 
@@ -394,8 +477,59 @@ class AppDatabase {
   }
 
   Future<void> markOpened(String id) async {
-    await _db.update('books', {'last_opened_at': _now()},
-        where: 'id = ?', whereArgs: [id]);
+    await _db.transaction((txn) async {
+      await txn.update('books', {'last_opened_at': _now()},
+          where: 'id = ?', whereArgs: [id]);
+      await _setEntryStatus(txn, id, ReadingStatus.reading,
+          onlyFrom: ReadingStatus.toRead);
+    });
+  }
+
+  /// Change le statut de l'entrée automatique d'un livre (ouvert → « En
+  /// cours », fini → « Lu »), sans toucher à une entrée déjà dans ce statut.
+  Future<void> _setEntryStatus(
+    DatabaseExecutor ex,
+    String bookId,
+    ReadingStatus status, {
+    ReadingStatus? onlyFrom,
+  }) async {
+    final rows = await ex.query('reading_list',
+        where: 'uid = ?',
+        whereArgs: [ReadingEntry.keyForBook(bookId)],
+        limit: 1);
+    if (rows.isEmpty) return;
+    final entry = ReadingEntry.fromRow(rows.first);
+    if (entry.status == status) return;
+    if (onlyFrom != null && entry.status != onlyFrom) return;
+    final updated = entry.copyWith(
+      status: status,
+      finishedAt: status == ReadingStatus.read ? DateTime.now() : null,
+      clearFinishedAt: status != ReadingStatus.read,
+    );
+    await _writeEntry(ex, updated);
+  }
+
+  // ---------------------------------------------------- Carnet de lectures
+
+  Future<List<ReadingEntry>> readingEntries() async {
+    final rows = await _db.query('reading_list');
+    return rows.map(ReadingEntry.fromRow).toList();
+  }
+
+  Future<void> _writeEntry(DatabaseExecutor ex, ReadingEntry entry) async {
+    await ex.insert('reading_list', entry.toRow(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+    await _record(ex, 'readlog', entry.uid, entry.toRow());
+  }
+
+  Future<void> saveReadingEntry(ReadingEntry entry) =>
+      _db.transaction((txn) => _writeEntry(txn, entry));
+
+  Future<void> deleteReadingEntry(String uid) async {
+    await _db.transaction((txn) async {
+      await txn.delete('reading_list', where: 'uid = ?', whereArgs: [uid]);
+      await _record(txn, 'readlog', uid, const {}, deleted: true);
+    });
   }
 
   // ---------------------------------------------------------- Marque-pages
@@ -774,6 +908,27 @@ class AppDatabase {
               {'book_id': linkBook, 'category_id': category['id']},
               conflictAlgorithm: ConflictAlgorithm.ignore);
         }
+      case 'readlog':
+        if (item.deleted) {
+          await ex.delete('reading_list',
+              where: 'uid = ?', whereArgs: [item.key]);
+          return;
+        }
+        final entryTitle = data['title'];
+        if (entryTitle is! String || entryTitle.trim().isEmpty) return;
+        final entry = ReadingEntry.fromRow({
+          ...data,
+          'uid': item.key,
+          'rating': jsonInt(data['rating']) ?? 0,
+          'finished_at': jsonInt(data['finished_at']),
+          'created_at': jsonInt(data['created_at']) ?? item.updatedAt,
+          'updated_at': item.updatedAt,
+          'author': data['author'] is String ? data['author'] : '',
+          'review': data['review'] is String ? data['review'] : '',
+          'book_id': data['book_id'] is String ? data['book_id'] : null,
+        });
+        await ex.insert('reading_list', entry.toRow(),
+            conflictAlgorithm: ConflictAlgorithm.replace);
       case 'annotation':
         if (item.deleted) {
           await ex.delete('annotations',
@@ -815,6 +970,7 @@ class AppDatabase {
         'categories',
         'sync_items',
         'seen_downloads',
+        'reading_list',
       ]) {
         await txn.delete(table);
       }

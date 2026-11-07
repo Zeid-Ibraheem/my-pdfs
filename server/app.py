@@ -26,7 +26,7 @@ import discover
 from config import Settings, load_settings
 from store import NotFound, QuotaExceeded, Store, StoreError
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 BOOK_ID = re.compile(r"[0-9a-f]{64}")
 MAX_BACKUP_BYTES = 500 * 1024 * 1024
 

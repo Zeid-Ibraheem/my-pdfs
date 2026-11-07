@@ -2,7 +2,7 @@
 
 Lecteur et bibliothèque PDF personnelle pour Android (Flutter), avec son propre serveur : stockage de 200 Go, recherche plein texte, sauvegardes et recherche de livres libres en ligne.
 
-## Fonctionnalités (version 0.5)
+## Fonctionnalités (version 0.6)
 
 **Lecture**
 - Défilement vertical continu, curseur à droite pour aller vite, reprise à la dernière page lue.
@@ -20,6 +20,11 @@ Lecteur et bibliothèque PDF personnelle pour Android (Flutter), avec son propre
 - Tri visible au-dessus de la liste : lus récemment, titre, date d'ajout, progression, nombre de pages, taille, avec ordre inverse.
 - Recherche par titre (sans tenir compte des accents).
 - Import avec le bouton « Importer ». Les livres importés restent sur le téléphone ; le bouton nuage de chaque livre les envoie sur le serveur.
+
+**Carnet de lectures (onglet Lectures)**
+- Livres lus, en cours ou à lire, avec note sur 5, avis et date de fin ; statistiques (lus cette année, note moyenne).
+- Les livres importés y entrent tout seuls et changent de statut d'eux-mêmes (ouvert → En cours, dernière page → Lu) ; les livres papier ou lus ailleurs s'ajoutent à la main.
+- Synchronisé entre profils ; supprimer un PDF garde son entrée dans le carnet.
 
 **Serveur (onglets Recherche, Découvrir, Réglages)**
 - Les livres du serveur apparaissent dans la bibliothèque comme les autres et **se lisent directement depuis le serveur**, sans être enregistrés sur le téléphone : seules les pages affichées sont transférées (requêtes HTTP partielles).

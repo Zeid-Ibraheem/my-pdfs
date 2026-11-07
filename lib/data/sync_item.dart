@@ -11,6 +11,8 @@ import 'dart:math';
 /// - bookcat    <livre>|<clé cat.>   {}               livre rangé dans une catégorie
 /// - annotation <uid>                {book_id, page, quote, rects, color,
 ///                                    note, created_at}
+/// - readlog    <uid> ou book:<livre> {title, author, rating, review, status,
+///                                    finished_at, book_id, created_at}
 ///
 /// Pour un même (type, clé), la version la plus récente gagne. Une
 /// suppression est un élément marqué [deleted] (sinon l'autre profil le

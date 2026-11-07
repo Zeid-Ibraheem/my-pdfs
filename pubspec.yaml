@@ -1,7 +1,7 @@
 name: my_pdfs
 description: Lecteur et bibliothèque PDF personnelle pour Android.
 publish_to: 'none'
-version: 0.5.1+6
+version: 0.6.0+7
 
 environment:
   sdk: ^3.9.0
@@ -11,14 +11,14 @@ environment:
 # avec ton Flutter.
 dependencies:
   crypto: ^3.0.8
-  file_picker: ^13.3.0
+  file_picker: ^13.3.2
   flutter:
     sdk: flutter
   http: ^1.6.0
-  material_ui: ^1.9.0
+  material_ui: ^1.10.0
   path: ^1.9.1
   path_provider: ^2.1.6
-  pdfrx: ^2.11.0
+  pdfrx: ^2.12.0
   sqflite: ^2.4.5
   url_launcher: ^6.3.3
 

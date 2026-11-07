@@ -66,3 +66,9 @@ String formatDateTime(DateTime date) {
   return '${two(date.day)}/${two(date.month)}/${date.year} '
       'à ${two(date.hour)}:${two(date.minute)}';
 }
+
+/// Date lisible : « 07/11/2026 ».
+String formatDate(DateTime date) {
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${two(date.day)}/${two(date.month)}/${date.year}';
+}
