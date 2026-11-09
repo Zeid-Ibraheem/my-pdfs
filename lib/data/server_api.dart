@@ -276,6 +276,19 @@ class ServerApi {
     return usage();
   }
 
+  /// Version d'API du serveur (0 pour les serveurs d'avant la v0.7, qui ne
+  /// l'indiquaient pas ; 1 = v0.3–0.4 ; 2 = synchro, effacement, carnet).
+  Future<int> apiVersion() {
+    return _guard(() async {
+      final response =
+          await _client.get(_uri('/api/health')).timeout(_shortTimeout);
+      _check(response.statusCode, response.bodyBytes);
+      final json = jsonDecode(utf8.decode(response.bodyBytes));
+      if (json is Map && json['api'] is num) return (json['api'] as num).toInt();
+      return 0;
+    });
+  }
+
   Future<ServerUsage> usage() async =>
       ServerUsage.fromJson(await _getJson('/api/usage') as Map<String, dynamic>);
 

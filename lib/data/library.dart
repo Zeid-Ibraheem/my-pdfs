@@ -12,6 +12,7 @@ import 'book.dart';
 import 'covers.dart';
 import 'database.dart';
 import 'server_api.dart';
+import '../config.dart';
 
 typedef ImportProgress = void Function(int index, int total, String name);
 
@@ -77,12 +78,12 @@ class Library extends ChangeNotifier {
   String? get serverUrl => _serverUrl;
   String? get serverToken => _serverToken;
 
-  static const _kUrl = 'serveur_url';
-  static const _kToken = 'serveur_jeton';
-  static const _kAutoBackup = 'sauvegarde_auto';
-  static const _kAutoUpload = 'envoi_auto';
-  static const _kLastBackup = 'derniere_sauvegarde';
-  static const _kCacheGb = 'cache_go';
+  static const _kUrl = SettingKeys.serverUrl;
+  static const _kToken = SettingKeys.serverToken;
+  static const _kAutoBackup = SettingKeys.autoBackup;
+  static const _kAutoUpload = SettingKeys.autoUpload;
+  static const _kLastBackup = SettingKeys.lastBackup;
+  static const _kCacheGb = SettingKeys.cacheGb;
 
   static Future<Library> open() async {
     final docs = await getApplicationDocumentsDirectory();
@@ -159,6 +160,7 @@ class Library extends ChangeNotifier {
     await _db.setSetting(_kUrl, cleanUrl);
     await _db.setSetting(_kToken, cleanToken);
     await _loadServerConfig();
+    _serverCompatible = false;
     notifyListeners();
     return usage;
   }
@@ -208,8 +210,25 @@ class Library extends ChangeNotifier {
     }
   }
 
+  /// Le serveur a-t-il déjà été vérifié compatible pendant cette session ?
+  bool _serverCompatible = false;
+
+  /// Vérifie une fois par session que le serveur connaît toutes les routes
+  /// utilisées par cette version de l'appli, avec un message clair sinon.
+  Future<void> _ensureServerCompatible() async {
+    if (_serverCompatible) return;
+    final apiVersion = await _requireApi().apiVersion();
+    if (apiVersion < AppInfo.minServerApi) {
+      throw const ServerException(
+          'Serveur pas à jour : sur le serveur, lance « cd ~/my-pdfs && '
+          'git pull && cd server && ./install.sh »');
+    }
+    _serverCompatible = true;
+  }
+
   Future<int> _syncAll() async {
     try {
+      await _ensureServerCompatible();
       final added = await _syncBooks();
       await _syncState();
       notifyListeners();
@@ -219,8 +238,8 @@ class Library extends ChangeNotifier {
     }
   }
 
-  static const _kSyncSeq = 'synchro_seq';
-  static const _kSyncEpoch = 'synchro_epoch';
+  static const _kSyncSeq = SettingKeys.syncSeq;
+  static const _kSyncEpoch = SettingKeys.syncEpoch;
 
   /// Échange l'état partagé avec le serveur, par paquets de 500.
   Future<void> _syncState() async {

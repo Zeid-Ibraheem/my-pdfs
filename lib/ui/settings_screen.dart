@@ -4,8 +4,8 @@ import '../data/library.dart';
 import '../data/server_api.dart';
 import '../util/text.dart';
 import 'common.dart';
+import '../config.dart';
 
-const appVersion = '0.6.0';
 
 /// Onglet Réglages : connexion au serveur, place sur le téléphone,
 /// sauvegarde des notes et de la progression.
@@ -503,7 +503,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const _Header('À propos'),
           ListTile(
             leading: const Icon(Icons.info_outline),
-            title: const Text('My PDFs $appVersion'),
+            title: const Text('${AppInfo.name} ${AppInfo.version}'),
             subtitle: const Text(
               'Tes PDF ne sont jamais modifiés : notes, surlignages et '
               'progression sont enregistrés à part, liés à l’empreinte '

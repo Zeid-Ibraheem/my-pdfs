@@ -26,7 +26,12 @@ import discover
 from config import Settings, load_settings
 from store import NotFound, QuotaExceeded, Store, StoreError
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
+# Version de l'API : à augmenter quand on ajoute ou change une route utilisée
+# par l'appli (l'appli vérifie qu'elle est assez récente, voir lib/config.dart).
+#   1 : livres, recherche, sauvegardes, Découvrir (v0.3)
+#   2 : synchro de l'état, couvertures, effacement, carnet (v0.5–0.6)
+API_VERSION = 2
 BOOK_ID = re.compile(r"[0-9a-f]{64}")
 MAX_BACKUP_BYTES = 500 * 1024 * 1024
 
@@ -67,7 +72,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
     # ------------------------------------------------------------- routes
 
     async def health(request: Request) -> Response:
-        return JSONResponse({"ok": True, "version": VERSION})
+        return JSONResponse({"ok": True, "version": VERSION, "api": API_VERSION})
 
     @protected
     async def usage(request: Request) -> Response:

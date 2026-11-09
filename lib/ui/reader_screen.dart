@@ -11,6 +11,7 @@ import '../data/annotation.dart';
 import '../data/book.dart';
 import '../data/library.dart';
 import 'annotation_widgets.dart';
+import '../config.dart';
 
 /// Inverse les couleurs des pages (fond noir, texte blanc).
 const _nightFilter = ColorFilter.matrix(<double>[
@@ -181,7 +182,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<void> _loadState() async {
     final marks = await _lib.db.bookmarks(_book.id);
     final annotations = await _lib.db.annotations(_book.id);
-    final night = await _lib.db.getSetting('mode_nuit') == '1';
+    final night = await _lib.db.getSetting(SettingKeys.nightMode) == '1';
     _update(() {
       _bookmarks = marks;
       _night = night;
@@ -564,7 +565,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<void> _toggleNight() async {
     setState(() => _night = !_night);
     _repaintPages();
-    await _lib.db.setSetting('mode_nuit', _night ? '1' : '0');
+    await _lib.db.setSetting(SettingKeys.nightMode, _night ? '1' : '0');
   }
 
   Future<void> _askPage() async {

@@ -8,6 +8,7 @@ import '../data/server_api.dart';
 import '../util/text.dart';
 import 'book_tile.dart';
 import 'common.dart';
+import '../config.dart';
 
 /// Onglet Bibliothèque : filtres par catégorie, tri et liste des livres
 /// (sur le téléphone et sur le serveur).
@@ -107,9 +108,9 @@ class _LibraryScreenState extends State<LibraryScreen>
   Future<void> _uploadOne(Book book) => _uploadIds([book.id]);
 
   Future<void> _init() async {
-    _sort = BookSort.fromKey(await _lib.db.getSetting('tri'));
-    _reversed = await _lib.db.getSetting('tri_inverse') == '1';
-    _filter = LibraryFilter.fromKey(await _lib.db.getSetting('filtre'));
+    _sort = BookSort.fromKey(await _lib.db.getSetting(SettingKeys.sort));
+    _reversed = await _lib.db.getSetting(SettingKeys.sortReversed) == '1';
+    _filter = LibraryFilter.fromKey(await _lib.db.getSetting(SettingKeys.filter));
     await _reload();
     if (_lib.hasServer) await _sync(silent: true);
   }
@@ -199,7 +200,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   void _setFilter(LibraryFilter filter) {
     if (!mounted) return;
     setState(() => _filter = filter);
-    _lib.db.setSetting('filtre', filter.key);
+    _lib.db.setSetting(SettingKeys.filter, filter.key);
   }
 
   // ----------------------------------------------------------------- Tri
@@ -217,8 +218,8 @@ class _LibraryScreenState extends State<LibraryScreen>
               _reversed = reversed;
               _books = sortBooks(_books, sort, reversed: reversed);
             });
-            _lib.db.setSetting('tri', sort.key);
-            _lib.db.setSetting('tri_inverse', reversed ? '1' : '0');
+            _lib.db.setSetting(SettingKeys.sort, sort.key);
+            _lib.db.setSetting(SettingKeys.sortReversed, reversed ? '1' : '0');
           }
 
           return SafeArea(
