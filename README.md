@@ -2,11 +2,12 @@
 
 Lecteur et bibliothèque PDF personnelle pour Android (Flutter), avec son propre serveur : stockage de 200 Go, recherche plein texte, sauvegardes et recherche de livres libres en ligne.
 
-## Fonctionnalités (version 0.6)
+## Fonctionnalités (version 0.7)
 
 **Lecture**
 - Défilement vertical continu, curseur à droite pour aller vite, reprise à la dernière page lue.
-- Marque-pages, « aller à la page », mode nuit.
+- Marque-pages, « aller à la page », mode nuit, mode plein écran.
+- Carte « Reprendre la lecture » en haut de la bibliothèque ; temps de lecture par livre.
 - Recherche dans le livre ouvert (loupe en haut), avec les résultats surlignés.
 
 **Annotations**
@@ -85,6 +86,11 @@ lib/
 server/                        serveur Python (Starlette), tests, install.sh
 test/                          tests de l'appli
 ```
+
+## Pour aller plus loin
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) : fonctionnement et règles pour faire évoluer l'appli.
+- [CHANGELOG.md](CHANGELOG.md) : historique des versions.
 
 ## Dépannage
 

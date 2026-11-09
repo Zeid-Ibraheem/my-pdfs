@@ -37,7 +37,7 @@ const _noteDotColor = 0xFFFF9F00;
 /// donc on peint l'inverse pour retrouver la bonne teinte à l'affichage.
 int _invert(int argb) => 0xFF000000 | (~argb & 0x00FFFFFF);
 
-enum _MenuAction { addNote, bookmarks, goToPage, copyPage, night }
+enum _MenuAction { addNote, bookmarks, goToPage, copyPage, night, fullscreen }
 
 /// Une zone surlignée prête à peindre.
 class _Mark {
@@ -94,6 +94,12 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _night = false;
   bool _hasSelection = false;
   Timer? _saveTimer;
+
+  /// Temps de lecture : compté seulement quand l'appli est au premier plan.
+  final Stopwatch _readClock = Stopwatch()..start();
+
+  /// Plein écran : barres du haut et du système masquées.
+  bool _immersive = false;
 
   // Recherche dans le livre (moteur de pdfrx). Créé seulement quand le
   // lecteur est prêt : avant, le contrôleur n'est pas encore relié au
@@ -195,6 +201,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     WidgetsBinding.instance.removeObserver(this);
     _watchdog?.cancel();
     _lib.covers.resume();
+    _flushReadingTime();
+    if (_immersive) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    }
     _saveNow();
     final searcher = _searcher;
     if (searcher != null) {
@@ -293,7 +303,27 @@ class _ReaderScreenState extends State<ReaderScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // Android peut tuer l'appli en arrière-plan : on enregistre la page
     // dès qu'elle quitte le premier plan.
-    if (state != AppLifecycleState.resumed) _saveNow();
+    if (state == AppLifecycleState.resumed) {
+      _readClock.start();
+    } else {
+      _saveNow();
+      _readClock.stop();
+      _flushReadingTime();
+    }
+  }
+
+  /// Enregistre le temps de lecture écoulé depuis le dernier enregistrement.
+  void _flushReadingTime() {
+    final seconds = _readClock.elapsed.inSeconds;
+    if (seconds <= 0) return;
+    _readClock.reset(); // remet à zéro sans arrêter le chronomètre
+    _lib.db.addReadingTime(_book.id, seconds);
+  }
+
+  void _toggleImmersive() {
+    setState(() => _immersive = !_immersive);
+    SystemChrome.setEnabledSystemUIMode(
+        _immersive ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge);
   }
 
   /// setState sûr : les rappels du lecteur peuvent arriver pendant que
@@ -699,6 +729,8 @@ class _ReaderScreenState extends State<ReaderScreen>
         _copyPage();
       case _MenuAction.night:
         _toggleNight();
+      case _MenuAction.fullscreen:
+        _toggleImmersive();
     }
   }
 
@@ -825,7 +857,11 @@ class _ReaderScreenState extends State<ReaderScreen>
         }
       },
       child: Scaffold(
-        appBar: _searchMode ? _buildSearchBar() : AppBar(
+        appBar: _immersive
+            ? null
+            : _searchMode
+                ? _buildSearchBar()
+                : AppBar(
           titleSpacing: 0,
           title: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -905,6 +941,14 @@ class _ReaderScreenState extends State<ReaderScreen>
                     title: Text(_night ? 'Mode jour' : 'Mode nuit'),
                   ),
                 ),
+                const PopupMenuItem(
+                  value: _MenuAction.fullscreen,
+                  child: ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.fullscreen),
+                    title: Text('Plein écran'),
+                  ),
+                ),
               ],
             ),
           ],
@@ -917,6 +961,21 @@ class _ReaderScreenState extends State<ReaderScreen>
                 child: _buildViewer(),
               ),
             ),
+            if (_immersive)
+              Positioned(
+                top: 0,
+                right: 0,
+                child: SafeArea(
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: IconButton.filledTonal(
+                      icon: const Icon(Icons.fullscreen_exit),
+                      tooltip: 'Quitter le plein écran',
+                      onPressed: _toggleImmersive,
+                    ),
+                  ),
+                ),
+              ),
             if (_stuck)
               Positioned.fill(
                 child: ColoredBox(

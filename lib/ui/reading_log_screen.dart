@@ -21,6 +21,7 @@ class ReadingLogScreen extends StatefulWidget {
 class _ReadingLogScreenState extends State<ReadingLogScreen> {
   List<ReadingEntry> _entries = const [];
   Set<String> _booksHere = const {};
+  int _totalReadSeconds = 0;
   ReadingStatus? _filter; // null = tous
   bool _loading = true;
 
@@ -41,12 +42,16 @@ class _ReadingLogScreenState extends State<ReadingLogScreen> {
 
   Future<void> _reload() async {
     final entries = await _lib.db.readingEntries();
-    final books = {for (final b in await _lib.db.books()) b.id};
+    final allBooks = await _lib.db.books();
+    final books = {for (final b in allBooks) b.id};
+    final totalSeconds =
+        allBooks.fold<int>(0, (sum, b) => sum + b.readSeconds);
     if (!mounted) return;
     entries.sort(_compare);
     setState(() {
       _entries = entries;
       _booksHere = books;
+      _totalReadSeconds = totalSeconds;
       _loading = false;
     });
   }
@@ -138,6 +143,8 @@ class _ReadingLogScreenState extends State<ReadingLogScreen> {
     final parts = [
       '${read.length} lu${read.length > 1 ? 's' : ''}',
       '$thisYear en $year',
+      if (_totalReadSeconds >= 60)
+        '${formatDuration(_totalReadSeconds)} de lecture',
       if (average != null)
         'note moyenne ${average.toStringAsFixed(1).replaceAll('.', ',')} / 5',
     ];

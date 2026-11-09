@@ -803,12 +803,50 @@ class _LibraryScreenState extends State<LibraryScreen>
     );
   }
 
+  /// Dernier livre ouvert et pas encore fini (carte « Reprendre »).
+  Book? get _resumeBook {
+    Book? best;
+    for (final book in _books) {
+      final opened = book.lastOpenedAt;
+      if (opened == null || book.finished) continue;
+      if (best == null || opened.isAfter(best.lastOpenedAt!)) best = book;
+    }
+    return best;
+  }
+
+  Widget _buildResumeCard(Book book) {
+    final theme = Theme.of(context);
+    final count = book.pageCount;
+    final where = count == null
+        ? 'Page ${book.lastPage}'
+        : 'Page ${book.lastPage} / $count';
+    return Card(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      color: theme.colorScheme.secondaryContainer,
+      child: ListTile(
+        leading: Icon(Icons.play_circle_outline,
+            size: 36, color: theme.colorScheme.onSecondaryContainer),
+        title: const Text('Reprendre la lecture'),
+        subtitle: Text('${book.title}\n$where',
+            maxLines: 2, overflow: TextOverflow.ellipsis),
+        isThreeLine: true,
+        onTap: () => openBook(context, _lib, book),
+      ),
+    );
+  }
+
   Widget _buildList(List<Book> books) {
+    // Carte « Reprendre » seulement sur la vue complète, sans recherche.
+    final resume = _filter == LibraryFilter.all && _query.trim().isEmpty
+        ? _resumeBook
+        : null;
+    final offset = resume == null ? 0 : 1;
     return ListView.builder(
       padding: const EdgeInsets.only(bottom: 96),
-      itemCount: books.length,
+      itemCount: books.length + offset,
       itemBuilder: (context, index) {
-        final book = books[index];
+        if (resume != null && index == 0) return _buildResumeCard(resume);
+        final book = books[index - offset];
         return BookTile(
           key: ValueKey(book.id),
           book: book,

@@ -18,6 +18,7 @@ class Book {
     this.onDevice = true,
     this.onServer = false,
     this.pinned = false,
+    this.readSeconds = 0,
   });
 
   final String id;
@@ -37,6 +38,9 @@ class Book {
 
   /// Le fichier est présent sur le téléphone.
   final bool onDevice;
+
+  /// Temps passé à lire ce livre sur ce profil (en secondes).
+  final int readSeconds;
 
   /// Le fichier est stocké sur le serveur.
   final bool onServer;
@@ -72,6 +76,7 @@ class Book {
       onDevice: (row['on_device'] as int? ?? 1) == 1,
       onServer: (row['on_server'] as int? ?? 0) == 1,
       pinned: (row['pinned'] as int? ?? 0) == 1,
+      readSeconds: row['read_seconds'] as int? ?? 0,
     );
   }
 
@@ -87,6 +92,7 @@ class Book {
         'on_device': onDevice ? 1 : 0,
         'on_server': onServer ? 1 : 0,
         'pinned': pinned ? 1 : 0,
+        'read_seconds': readSeconds,
       };
 }
 

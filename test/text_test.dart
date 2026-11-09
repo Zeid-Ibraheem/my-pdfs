@@ -25,4 +25,10 @@ void main() {
     expect(looksLikePdf('<html>'.codeUnits), isFalse);
     expect(looksLikePdf(const []), isFalse);
   });
+
+  test('formatDuration', () {
+    expect(formatDuration(30), '< 1 min');
+    expect(formatDuration(45 * 60), '45 min');
+    expect(formatDuration(2 * 3600 + 5 * 60), '2 h 05');
+  });
 }

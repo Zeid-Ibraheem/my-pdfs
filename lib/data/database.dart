@@ -23,6 +23,7 @@ import 'sync_item.dart';
 /// 5. synchronisation entre profils : identifiants globaux des catégories et
 ///    annotations, table sync_items (miroir de l'état du serveur)
 /// 6. carnet de lectures (livres lus, en cours, à lire, avec note et avis)
+/// 7. temps de lecture par livre
 ///
 /// Chaque modification synchronisable (page, marque-page, note, catégorie,
 /// titre) écrit aussi un élément dans sync_items, marqué « à envoyer ».
@@ -43,7 +44,7 @@ class AppDatabase {
     final path = await defaultPath();
     final db = await openDatabase(
       path,
-      version: 6,
+      version: 7,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
       },
@@ -54,6 +55,7 @@ class AppDatabase {
         await _createV4(db);
         await _createV5(db);
         await _createV6(db);
+        await _createV7(db);
       },
       // Mise à jour d'une appli déjà installée : on ajoute ce qui manque
       // sans toucher aux livres, marque-pages et annotations existants.
@@ -63,6 +65,7 @@ class AppDatabase {
         if (oldVersion < 4) await _createV4(db);
         if (oldVersion < 5) await _createV5(db);
         if (oldVersion < 6) await _createV6(db);
+        if (oldVersion < 7) await _createV7(db);
       },
     );
     return AppDatabase._(db, path);
@@ -293,6 +296,12 @@ class AppDatabase {
     }
   }
 
+  /// Version 7 : temps de lecture par livre.
+  static Future<void> _createV7(Database db) async {
+    await db.execute(
+        'ALTER TABLE books ADD COLUMN read_seconds INTEGER NOT NULL DEFAULT 0');
+  }
+
   /// Entrée automatique d'un livre importé. Datée de 1 (la plus ancienne
   /// possible) : toute vraie modification, sur n'importe quel profil, gagne
   /// contre elle à la synchro. N'écrase jamais une entrée existante ni une
@@ -474,6 +483,14 @@ class AppDatabase {
             'UPDATE books SET on_server = 1 WHERE id IN ($marks)', chunk);
       }
     });
+  }
+
+  /// Ajoute du temps de lecture à un livre.
+  Future<void> addReadingTime(String id, int seconds) async {
+    if (seconds <= 0) return;
+    await _db.rawUpdate(
+        'UPDATE books SET read_seconds = read_seconds + ? WHERE id = ?',
+        [seconds, id]);
   }
 
   Future<void> markOpened(String id) async {

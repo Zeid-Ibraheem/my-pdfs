@@ -72,3 +72,11 @@ String formatDate(DateTime date) {
   String two(int n) => n.toString().padLeft(2, '0');
   return '${two(date.day)}/${two(date.month)}/${date.year}';
 }
+
+/// Durée lisible : « 45 min », « 2 h 05 ». Moins d'une minute : « < 1 min ».
+String formatDuration(int seconds) {
+  final minutes = seconds ~/ 60;
+  if (minutes < 1) return '< 1 min';
+  if (minutes < 60) return '$minutes min';
+  return '${minutes ~/ 60} h ${(minutes % 60).toString().padLeft(2, '0')}';
+}

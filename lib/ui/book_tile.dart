@@ -157,6 +157,7 @@ class BookTile extends StatelessWidget {
     if (annotationCount > 0) {
       parts.add('$annotationCount note${annotationCount > 1 ? 's' : ''}');
     }
+    if (book.readSeconds >= 60) parts.add(formatDuration(book.readSeconds));
     return parts.join(' · ');
   }
 }
