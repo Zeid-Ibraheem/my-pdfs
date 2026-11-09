@@ -323,6 +323,22 @@ class StoreTest(unittest.TestCase):
             incoming.discard()
             self.assertEqual(list((Path(tmp) / "tmp").iterdir()), [])
 
+    def test_migrations(self):
+        import store as store_module
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Store(Path(tmp), quota_bytes=10)
+            self.assertEqual(first.schema_version, len(store_module.MIGRATIONS))
+            epoch = first.epoch
+            again = Store(Path(tmp), quota_bytes=10)  # réouverture sans effet
+            self.assertEqual(again.epoch, epoch)
+            mode = again._db.execute("PRAGMA journal_mode").fetchone()[0]
+            self.assertEqual(mode.lower(), "wal")
+            again._db.execute(
+                "UPDATE meta SET value = '999' WHERE key = 'schema_version'")
+            again._db.commit()
+            with self.assertRaises(RuntimeError):
+                Store(Path(tmp), quota_bytes=10)
+
     def test_backups_keep_seven(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp), quota_bytes=10**9, keep_backups=7)

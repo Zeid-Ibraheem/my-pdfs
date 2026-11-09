@@ -63,6 +63,17 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 """
 
+def _migration_1(db: sqlite3.Connection) -> None:
+    """Schéma de la v0.6 (déjà présent sur les serveurs existants : toutes
+    les instructions sont « IF NOT EXISTS », donc sans effet sur eux)."""
+    db.executescript(SCHEMA)
+
+
+# Migrations du schéma, appliquées dans l'ordre une seule fois chacune.
+# Pour faire évoluer la base : ajouter une fonction À LA FIN, ne jamais
+# modifier ni retirer une migration déjà publiée.
+MIGRATIONS = [_migration_1]
+
 STATE_KINDS = {"progress", "title", "bookmark", "category", "bookcat", "annotation", "readlog"}
 STATE_PAGE = 2000
 MAX_ITEM_BYTES = 200_000
@@ -139,9 +150,16 @@ class Store:
         self.quota_bytes = quota_bytes
         self.keep_backups = keep_backups
         self._lock = threading.RLock()
-        self._db = sqlite3.connect(data_dir / "catalog.db", check_same_thread=False)
+        self._db = sqlite3.connect(
+            data_dir / "catalog.db", check_same_thread=False, timeout=10
+        )
         self._db.row_factory = sqlite3.Row
-        self._db.executescript(SCHEMA)
+        # WAL : les lectures (ex. sqlite3 en ligne de commande) ne bloquent
+        # pas les écritures, et une coupure de courant n'abîme pas la base.
+        self._db.execute("PRAGMA journal_mode = WAL")
+        self._db.execute("PRAGMA synchronous = NORMAL")
+        self._db.execute("PRAGMA busy_timeout = 10000")
+        self.schema_version = self._migrate()
         # Identifiant de cette base d'état : s'il change (base recréée),
         # l'appli renvoie tout ce qu'elle a au lieu de croire être à jour.
         if self._db.execute("SELECT 1 FROM meta WHERE key = 'epoch'").fetchone() is None:
@@ -152,6 +170,30 @@ class Store:
         self.epoch = self._db.execute(
             "SELECT value FROM meta WHERE key = 'epoch'"
         ).fetchone()[0]
+
+    def _migrate(self) -> int:
+        """Applique les migrations pas encore faites ; renvoie la version."""
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        row = self._db.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()
+        current = int(row[0]) if row else 0
+        if current > len(MIGRATIONS):
+            raise RuntimeError(
+                f"Base de données plus récente (schéma {current}) que ce serveur "
+                f"({len(MIGRATIONS)}) : mets le serveur à jour (git pull)."
+            )
+        for number in range(current + 1, len(MIGRATIONS) + 1):
+            log.info("Migration du schéma : version %s", number)
+            MIGRATIONS[number - 1](self._db)
+            self._db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
+                (str(number),),
+            )
+            self._db.commit()
+        return len(MIGRATIONS)
 
     # ------------------------------------------------------------ catalogue
 
