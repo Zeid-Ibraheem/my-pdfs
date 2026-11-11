@@ -1,104 +1,67 @@
 # My PDFs
 
-Lecteur et bibliothèque PDF personnelle pour Android (Flutter), avec son propre serveur : stockage de 200 Go, recherche plein texte, sauvegardes et recherche de livres libres en ligne.
+Ma bibliothèque PDF sur Android, avec mon propre serveur à la maison. Je lis en faisant défiler vers le bas, je reprends là où je m'étais arrêté, et je surligne sans jamais modifier le fichier.
 
-## Fonctionnalités (version 0.7)
+<!-- CAPTURES : supprimer cette ligne et la ligne « FIN CAPTURES » quand les images sont dans docs/captures/
+<p align="center">
+  <img src="docs/captures/1-bibliotheque.jpg" width="230" alt="La bibliothèque, avec la carte « Reprendre la lecture »">
+  <img src="docs/captures/2-lecture.jpg" width="230" alt="Un livre ouvert, avec un passage surligné">
+  <img src="docs/captures/3-notes.jpg" width="230" alt="Le panneau des notes et surlignages">
+</p>
+<p align="center">
+  <img src="docs/captures/4-carnet.jpg" width="230" alt="Le carnet de lectures et ses statistiques">
+  <img src="docs/captures/5-recherche.jpg" width="230" alt="Recherche d'un mot dans tous les livres du serveur">
+  <img src="docs/captures/6-decouvrir.jpg" width="230" alt="Livres libres de droits à ajouter">
+</p>
+FIN CAPTURES -->
 
-**Lecture**
-- Défilement vertical continu, curseur à droite pour aller vite, reprise à la dernière page lue.
-- Marque-pages, « aller à la page », mode nuit, mode plein écran.
-- Carte « Reprendre la lecture » en haut de la bibliothèque ; temps de lecture par livre.
-- Recherche dans le livre ouvert (loupe en haut), avec les résultats surlignés.
+## Pourquoi je l'ai fait
 
-**Annotations**
-- Sélection de texte (appui long) : copier, surligner en 4 couleurs, surligner + note.
-- Notes libres par page, point orange sur les pages annotées.
-- Panneau « Notes et surlignages » : relire, modifier, supprimer, tout copier en Markdown.
-- Les PDF ne sont jamais modifiés : tout est enregistré à part, lié à l'empreinte SHA-256 de chaque fichier.
+<!-- À TOI : ta dictée remplacera ce paragraphe. -->
+J'ai beaucoup de livres en PDF, et le lecteur de mon téléphone tournait les pages une par une, sans rangement ni reprise de lecture. Je voulais une vraie bibliothèque, rangée par catégories, avec mes notes, et des livres stockés chez moi plutôt que chez un service en ligne.
 
-**Rangement**
-- Catégories créées par toi (un livre peut être dans plusieurs) + filtres automatiques : En cours, Pas commencés, Terminés.
-- Tri visible au-dessus de la liste : lus récemment, titre, date d'ajout, progression, nombre de pages, taille, avec ordre inverse.
-- Recherche par titre (sans tenir compte des accents).
-- Import avec le bouton « Importer ». Les livres importés restent sur le téléphone ; le bouton nuage de chaque livre les envoie sur le serveur.
+## Ce que ça fait
 
-**Carnet de lectures (onglet Lectures)**
-- Livres lus, en cours ou à lire, avec note sur 5, avis et date de fin ; statistiques (lus cette année, note moyenne).
-- Les livres importés y entrent tout seuls et changent de statut d'eux-mêmes (ouvert → En cours, dernière page → Lu) ; les livres papier ou lus ailleurs s'ajoutent à la main.
-- Synchronisé entre profils ; supprimer un PDF garde son entrée dans le carnet.
-
-**Serveur (onglets Recherche, Découvrir, Réglages)**
-- Les livres du serveur apparaissent dans la bibliothèque comme les autres et **se lisent directement depuis le serveur**, sans être enregistrés sur le téléphone : seules les pages affichées sont transférées (requêtes HTTP partielles).
-- « Télécharger sur le téléphone » pour lire hors connexion, « Libérer de la place », épinglage, limite de place sur le téléphone.
+- Lecture en défilement continu, reprise à la dernière page lue, mode nuit, plein écran, temps de lecture.
+- Surlignage en 4 couleurs et notes par page, exportables en Markdown. Le PDF n'est jamais modifié.
+- Catégories, filtres automatiques (en cours, pas commencés, terminés), tri et recherche par titre.
+- Un serveur à la maison, avec 200 Go de place. Les livres qui y sont se lisent directement, sans les télécharger sur le téléphone.
 - Recherche d'un mot dans le texte de tous les livres du serveur.
-- Découvrir : livres libres sur Internet Archive, Open Library et Gallica ; « Ajouter » les télécharge sur le serveur.
-- Sauvegarde automatique des catégories, notes et progression après chaque lecture, et restauration.
-- **Synchronisation entre profils ou appareils** : page en cours, marque-pages, surlignages, notes, catégories et titres sont partagés via le serveur, élément par élément (la modification la plus récente gagne). Synchro au lancement, au retour dans l'appli, à l'ouverture et à la fermeture d'un livre.
-- Couvertures créées une seule fois en images (par le téléphone, ou par le serveur avec `pdftoppm` pour les livres qui n'y sont que sur le serveur).
+- Un carnet de lectures : livres lus, en cours ou à lire, avec une note et des statistiques.
+- « Découvrir » : des livres libres de droits à ajouter en un appui (Internet Archive, Open Library, Gallica).
 
-Limite : pas d'OCR, donc pas de texte copiable ni cherchable dans les pages scannées.
+Tout le détail : [docs/FONCTIONNALITES.md](docs/FONCTIONNALITES.md).
 
-## Installation
+## Comment c'est construit
 
-### 1. Le serveur (sur la machine allumée 24 h/24, avec Tailscale)
+```mermaid
+flowchart LR
+    A["Téléphone<br/>appli Flutter + SQLite"]
+    S["Serveur à la maison<br/>Python + SQLite"]
+    A <-->|"VPN Tailscale<br/>HTTP + jeton"| S
+```
+
+- **L'appli** est en Flutter. L'affichage des PDF passe par pdfrx, et les notes, catégories et progressions sont dans une base SQLite.
+- **Le serveur** est en Python (Starlette). Il stocke les livres, indexe leur texte pour la recherche (SQLite FTS5) et sauvegarde les données de lecture.
+- **Chaque livre est identifié par l'empreinte SHA-256 de son fichier.** Si je renomme ou déplace un PDF, ses notes et sa progression le suivent.
+- **La synchronisation se fait élément par élément** (page en cours, notes, catégories…). En cas de conflit, la modification la plus récente gagne.
+
+## Ce qui m'a posé problème
+
+<!-- À TOI : remplace ou complète avec ta version. -->
+- **L'écran gris.** En version finale, ouvrir un livre donnait un écran gris, alors que tout marchait en mode développement. La cause : l'outil de recherche dans le livre était créé avant que le PDF soit chargé. Je l'ai corrigé, et l'appli affiche maintenant la vraie erreur au lieu d'un écran vide.
+- **Lire sans remplir le téléphone.** Les livres du serveur se lisent par morceaux : seules les pages affichées sont transférées, grâce aux requêtes HTTP partielles.
+- **Rester dans la loi.** « Découvrir » ne propose que des livres libres de droits. J'ai écarté les sources qui donnent accès à des livres protégés.
+
+Limite connue : pas de reconnaissance de texte (OCR), donc le texte des pages scannées n'est ni copiable ni cherchable.
+
+## Installer
+
+Il faut une machine allumée en permanence pour le serveur, avec Tailscale, et Flutter sur le PC pour l'appli. En résumé :
 
 ```bash
-git clone https://github.com/Zeid-Ibraheem/my-pdfs.git
-cd my-pdfs/server
-./install.sh
+cd my-pdfs/server && ./install.sh   # sur le serveur : affiche l'adresse et le jeton
+cd my-pdfs && ./setup.sh && flutter run --release   # sur le PC, téléphone branché
 ```
 
-Le script affiche à la fin l'**adresse** et le **jeton** à saisir dans l'appli. Détails : [server/README.md](server/README.md).
-
-### 2. L'appli (sur le PC, téléphone branché en USB)
-
-Prérequis : Flutter **3.47 ou plus** (`flutter upgrade`) et le SDK Android.
-
-```bash
-cd my-pdfs
-./setup.sh            # crée android/, ajoute les paquets, vérifie le code (relançable)
-flutter run --release # installe et lance sur le téléphone
-```
-
-Puis dans l'appli : onglet **Réglages** > adresse + jeton > « Tester et enregistrer ». Tailscale doit être actif sur le téléphone, dans le même profil que l'appli.
-
-## Organisation du code
-
-```
-lib/
-  main.dart                    démarrage, thème clair/sombre
-  data/
-    book.dart                  modèle Livre, tri
-    category.dart              catégories, filtres
-    annotation.dart            surlignages, notes, export Markdown
-    database.dart              base SQLite (version 3)
-    library.dart               fichiers, import, serveur, cache, sauvegarde
-    server_api.dart            client HTTP du serveur
-  ui/
-    home_screen.dart           onglets du bas
-    library_screen.dart        bibliothèque
-    reader_screen.dart         lecteur (pdfrx)
-    search_screen.dart         recherche plein texte
-    discover_screen.dart       livres libres en ligne
-    settings_screen.dart       réglages
-    book_tile.dart, annotation_widgets.dart, common.dart
-  util/text.dart               titres, accents, tailles, dates
-server/                        serveur Python (Starlette), tests, install.sh
-test/                          tests de l'appli
-```
-
-## Pour aller plus loin
-
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) : fonctionnement et règles pour faire évoluer l'appli.
-- [CHANGELOG.md](CHANGELOG.md) : historique des versions.
-
-## Dépannage
-
-| Problème | Solution |
-| --- | --- |
-| `pdfrx requires Flutter >= 3.47` | `flutter upgrade` puis `./setup.sh` |
-| « Serveur injoignable » | Tailscale activé sur le téléphone ? Serveur allumé ? `systemctl status my-pdfs` sur le serveur |
-| « Jeton refusé » | Recopie le jeton : `sed -n 's/^MYPDFS_TOKEN=//p' ~/my-pdfs-data/server.env` |
-| Erreur de compilation native (NDK) | Android Studio > SDK Manager > SDK Tools > NDK |
-| `flutter test` : « No compiler configured » | pdfrx compile PDFium pour le PC pendant les tests : `sudo pacman -S --needed clang lld llvm` |
-| `minSdkVersion` trop bas | `android/app/build.gradle.kts` : `minSdk = 24` |
+Pas à pas et dépannage : [docs/INSTALLATION.md](docs/INSTALLATION.md). Fonctionnement interne : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Historique des versions : [CHANGELOG.md](CHANGELOG.md) (version actuelle : 0.7).
