@@ -465,6 +465,11 @@ class AppDatabase {
         where: 'id = ?', whereArgs: [id]);
   }
 
+  /// Plus aucun livre n'est sur le serveur (serveur vidé et abandonné).
+  Future<void> markAllOffServer() async {
+    await _db.rawUpdate('UPDATE books SET on_server = 0, pinned = 0');
+  }
+
   Future<void> setPinned(String id, bool value) async {
     await _db.update('books', {'pinned': value ? 1 : 0},
         where: 'id = ?', whereArgs: [id]);

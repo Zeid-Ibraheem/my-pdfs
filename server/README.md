@@ -27,6 +27,7 @@ Options : `MYPDFS_QUOTA_GB=200` (quota), `MYPDFS_DATA=~/my-pdfs-data` (dossier d
 | État du service | `systemctl status my-pdfs` |
 | Journal | `journalctl -u my-pdfs -n 50` |
 | Mise à jour | `git pull && ./install.sh` |
+| Désinstaller complètement | `./uninstall.sh` |
 | Revoir le jeton | `sed -n 's/^MYPDFS_TOKEN=//p' ~/my-pdfs-data/server.env` |
 
 ## Dossier de données

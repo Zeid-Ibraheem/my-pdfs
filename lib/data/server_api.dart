@@ -512,6 +512,21 @@ class ServerApi {
     });
   }
 
+  /// Supprime ABSOLUMENT tout sur le serveur (livres, titres, texte,
+  /// couvertures, état, sauvegardes, configuration et jeton), puis l'arrête.
+  Future<void> eraseAll() {
+    return _guard(() async {
+      final response = await _client
+          .post(
+            _uri('/api/erase-all'),
+            headers: {..._auth, 'Content-Type': 'application/json'},
+            body: jsonEncode({'confirm': 'TOUT SUPPRIMER'}),
+          )
+          .timeout(const Duration(minutes: 5));
+      _check(response.statusCode, response.bodyBytes);
+    });
+  }
+
   /// Couverture (PNG) générée par le serveur, ou `null` s'il n'en a pas.
   Future<List<int>?> cover(String id) async {
     try {

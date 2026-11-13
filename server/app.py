@@ -12,7 +12,9 @@ from __future__ import annotations
 import contextlib
 import hmac
 import logging
+import os
 import re
+import signal
 import threading
 
 from starlette.applications import Starlette
@@ -26,12 +28,13 @@ import discover
 from config import Settings, load_settings
 from store import NotFound, QuotaExceeded, Store, StoreError
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 # Version de l'API : à augmenter quand on ajoute ou change une route utilisée
 # par l'appli (l'appli vérifie qu'elle est assez récente, voir lib/config.dart).
 #   1 : livres, recherche, sauvegardes, Découvrir (v0.3)
 #   2 : synchro de l'état, couvertures, effacement, carnet (v0.5–0.6)
-API_VERSION = 2
+#   3 : effacement complet du serveur (erase-all, v0.8)
+API_VERSION = 3
 BOOK_ID = re.compile(r"[0-9a-f]{64}")
 MAX_BACKUP_BYTES = 500 * 1024 * 1024
 
@@ -42,10 +45,16 @@ def error(status: int, message: str) -> JSONResponse:
     return JSONResponse({"detail": message}, status_code=status)
 
 
-def create_app(settings: Settings | None = None) -> Starlette:
+def _stop_server() -> None:
+    """Arrêt propre (code 0) : systemd ne le relance pas."""
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def create_app(settings: Settings | None = None, shutdown=_stop_server) -> Starlette:
     settings = settings or load_settings()
     store = Store(settings.data_dir, settings.quota_bytes, settings.keep_backups)
     expected_auth = f"Bearer {settings.token}".encode()
+    erased = threading.Event()  # tout a été effacé : plus aucune requête
 
     def protected(handler):
         """Vérifie le jeton et transforme les erreurs prévues en réponses JSON."""
@@ -54,6 +63,8 @@ def create_app(settings: Settings | None = None) -> Starlette:
             given = request.headers.get("authorization", "").encode()
             if not hmac.compare_digest(given, expected_auth):
                 return error(401, "Jeton invalide")
+            if erased.is_set():
+                return error(410, "Serveur entièrement effacé : réinstalle-le pour t'en resservir")
             try:
                 return await handler(request)
             except StoreError as exc:
@@ -153,6 +164,16 @@ def create_app(settings: Settings | None = None) -> Starlette:
             raise StoreError("Confirmation manquante")
         result = await run_in_threadpool(store.wipe, bool(body.get("books", False)))
         return JSONResponse(result)
+
+    @protected
+    async def erase_all(request: Request) -> Response:
+        """Supprime absolument tout sur le serveur, puis l'arrête."""
+        body = await request.json()
+        if not isinstance(body, dict) or body.get("confirm") != "TOUT SUPPRIMER":
+            raise StoreError("Confirmation manquante")
+        await run_in_threadpool(store.erase_all)
+        erased.set()
+        return JSONResponse({"ok": True}, background=BackgroundTask(shutdown))
 
     @protected
     async def update_book(request: Request) -> Response:
@@ -260,6 +281,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
         Route("/api/books/{book_id}/cover", book_cover, methods=["GET"]),
         Route("/api/state", sync_state, methods=["POST"]),
         Route("/api/wipe", wipe, methods=["POST"]),
+        Route("/api/erase-all", erase_all, methods=["POST"]),
         Route("/api/search", search, methods=["GET"]),
         Route("/api/backups", list_backups, methods=["GET"]),
         Route("/api/backup", upload_backup, methods=["PUT"]),

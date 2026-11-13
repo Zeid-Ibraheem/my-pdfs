@@ -541,6 +541,24 @@ class Store:
         log.warning("Effacement total (livres : %s)", "oui" if delete_books else "non")
         return {"epoch": self.epoch, "deleted_books": deleted_books}
 
+    def erase_all(self) -> None:
+        """Efface ABSOLUMENT tout le dossier de données : livres, titres,
+        texte extrait, couvertures, état synchronisé, sauvegardes, fichiers
+        temporaires et configuration (jeton compris). Le serveur n'est plus
+        utilisable ensuite : il faut le réinstaller (install.sh) pour s'en
+        resservir."""
+        with self._lock:
+            self._db.close()
+            for entry in sorted(self.data_dir.rglob("*"), reverse=True):
+                try:
+                    if entry.is_dir() and not entry.is_symlink():
+                        entry.rmdir()
+                    else:
+                        entry.unlink(missing_ok=True)
+                except OSError:
+                    log.exception("Impossible d'effacer %s", entry)
+        log.warning("Effacement complet du dossier de données %s", self.data_dir)
+
     # ----------------------------------------------------------- sauvegardes
 
     def save_backup(self, incoming: IncomingFile) -> dict:

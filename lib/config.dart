@@ -4,7 +4,7 @@ class AppInfo {
   AppInfo._();
 
   static const name = 'My PDFs';
-  static const version = '0.7.0';
+  static const version = '0.8.0';
 
   /// Version d'API minimale attendue du serveur (server/app.py, API_VERSION).
   /// À augmenter quand l'appli utilise une nouvelle route du serveur.

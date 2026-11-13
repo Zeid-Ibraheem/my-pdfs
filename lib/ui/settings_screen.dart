@@ -1,5 +1,6 @@
 import 'package:material_ui/material_ui.dart';
 
+import '../data/book.dart';
 import '../data/library.dart';
 import '../data/server_api.dart';
 import '../util/text.dart';
@@ -259,6 +260,99 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
+  /// Rapatrie tous les livres sur le téléphone puis vide entièrement le
+  /// serveur (livres, titres, état, sauvegardes, configuration).
+  Future<void> _leaveServer() async {
+    final List<Book> missing;
+    try {
+      missing = await _lib.serverOnlyBooks();
+    } on ServerException catch (e) {
+      if (mounted) showSnack(context, e.message);
+      return;
+    }
+    if (!mounted) return;
+    final size = missing.fold<int>(0, (sum, b) => sum + b.sizeBytes);
+    final typed = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (dialogContext, setDialog) => AlertDialog(
+          title: const Text('Tout rapatrier et vider le serveur ?'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '1. Téléchargement sur ce téléphone : '
+                  '${missing.isEmpty ? 'rien à télécharger, tout y est déjà' : '${missing.length} livre${missing.length > 1 ? 's' : ''} (${formatSize(size)})'}.\n'
+                  '2. Puis suppression de TOUT sur le serveur : livres, '
+                  'titres, texte, couvertures, notes synchronisées, '
+                  'sauvegardes et configuration (jeton compris). Le serveur '
+                  's’arrête.\n'
+                  '3. L’appli oublie le serveur. Tes notes, surlignages, '
+                  'catégories, carnet et pages en cours restent sur ce '
+                  'téléphone.\n\n'
+                  'Si un seul livre échoue au téléchargement, rien n’est '
+                  'supprimé sur le serveur.\n\n'
+                  'Ton autre profil perdra l’accès aux livres qui n’étaient '
+                  'que sur le serveur : rapatrie-les là-bas d’abord si tu '
+                  'en as besoin.',
+                ),
+                const SizedBox(height: 12),
+                const Text('Tape TOUT SUPPRIMER pour confirmer :'),
+                TextField(
+                  controller: typed,
+                  autocorrect: false,
+                  textCapitalization: TextCapitalization.characters,
+                  onChanged: (_) => setDialog(() {}),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Annuler'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(dialogContext).colorScheme.error,
+                foregroundColor: Theme.of(dialogContext).colorScheme.onError,
+              ),
+              onPressed: typed.text.trim() == 'TOUT SUPPRIMER'
+                  ? () => Navigator.pop(dialogContext, true)
+                  : null,
+              child: const Text('Rapatrier et vider'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _run(() async {
+      await runWithProgress<void>(
+        context,
+        'Rapatriement',
+        (progress, detail) => _lib.repatriateAndLeaveServer(
+          onProgress: (index, total, name) {
+            progress.value = total == 0 ? null : index / total;
+            detail.value = index < total ? '${index + 1} / $total · $name' : name;
+          },
+        ),
+      );
+      if (!mounted) return;
+      setState(() {
+        _url.clear();
+        _token.clear();
+        _usage = null;
+        _serverError = null;
+      });
+      showSnack(context,
+          'Tout est sur le téléphone, le serveur est vide et arrêté');
+    });
+  }
+
   Future<void> _restore() => _run(() async {
         final ok = await confirmDialog(
           context,
@@ -485,6 +579,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
             subtitle: const Text(
                 'Après un changement ou une réinitialisation du téléphone'),
             onTap: _restore,
+          ),
+
+          const _Header('Quitter le serveur'),
+          ListTile(
+            enabled: connected && !_busy,
+            leading: Icon(Icons.cloud_off_outlined,
+                color: theme.colorScheme.error),
+            title: const Text('Tout rapatrier et vider le serveur'),
+            subtitle: const Text(
+                'Télécharge ici tous les livres qui n’y sont pas, puis '
+                'supprime absolument tout sur le serveur, configuration '
+                'comprise'),
+            onTap: _leaveServer,
           ),
 
           const _Header('Effacement'),

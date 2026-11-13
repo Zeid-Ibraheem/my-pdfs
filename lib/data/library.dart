@@ -350,6 +350,13 @@ class Library extends ChangeNotifier {
 
   /// Télécharge sur le téléphone un livre qui n'est que sur le serveur.
   Future<void> downloadBook(Book book, {ProgressCallback? onProgress}) async {
+    await _downloadFile(book, onProgress: onProgress);
+    await enforceCacheLimit(keepId: book.id);
+    notifyListeners();
+  }
+
+  /// Télécharge le PDF (empreinte vérifiée) sans appliquer la limite de place.
+  Future<void> _downloadFile(Book book, {ProgressCallback? onProgress}) async {
     final api = _requireApi();
     final tmp = File(p.join(
         booksDir, 'dl-${DateTime.now().microsecondsSinceEpoch}.part'));
@@ -361,7 +368,70 @@ class Library extends ChangeNotifier {
       await _deleteQuietly(tmp);
     }
     await _db.setOnDevice(book.id, true);
-    await enforceCacheLimit(keepId: book.id);
+  }
+
+  /// Livres qui ne sont que sur le serveur (à télécharger avant de le quitter).
+  Future<List<Book>> serverOnlyBooks() async {
+    if (hasServer) await _syncBooks();
+    return (await _db.books())
+        .where((b) => b.onServer && !b.onDevice)
+        .toList();
+  }
+
+  /// Rapatrie sur le téléphone tous les livres absents, PUIS supprime
+  /// absolument tout sur le serveur et oublie sa configuration.
+  ///
+  /// Sécurité : si un seul livre n'a pas pu être téléchargé (réseau, place),
+  /// RIEN n'est supprimé sur le serveur. Notes, surlignages, catégories,
+  /// carnet et progression restent sur le téléphone.
+  Future<void> repatriateAndLeaveServer({ImportProgress? onProgress}) async {
+    final api = _requireApi();
+    if (await api.apiVersion() < 3) {
+      // Vérifié AVANT de télécharger : un ancien serveur ne sait pas
+      // s'effacer entièrement.
+      throw const ServerException(
+          'Serveur pas à jour : sur le serveur, lance « cd ~/my-pdfs && '
+          'git pull && cd server && ./install.sh »');
+    }
+    final missing = await serverOnlyBooks();
+    final failed = <String>[];
+    for (var i = 0; i < missing.length; i++) {
+      final book = missing[i];
+      onProgress?.call(i, missing.length, book.title);
+      try {
+        await _downloadFile(book);
+      } on ServerException {
+        failed.add(book.title);
+      } on FileSystemException {
+        failed.add(book.title); // téléphone plein, par exemple
+      }
+    }
+    for (final book in missing) {
+      final file = File(pathOf(book));
+      if (!await file.exists() || await file.length() == 0) {
+        if (!failed.contains(book.title)) failed.add(book.title);
+      }
+    }
+    if (failed.isNotEmpty) {
+      notifyListeners();
+      throw ServerException(
+          '${failed.length} livre${failed.length > 1 ? 's' : ''} non '
+          'téléchargé${failed.length > 1 ? 's' : ''} (${failed.take(3).join(', ')}'
+          '${failed.length > 3 ? '…' : ''}). Rien n’a été supprimé sur le '
+          'serveur : libère de la place ou vérifie la connexion, puis réessaie.');
+    }
+
+    onProgress?.call(missing.length, missing.length, 'Suppression sur le serveur…');
+    await api.eraseAll();
+
+    await _db.markAllOffServer();
+    await _db.setSetting(_kSyncSeq, '0');
+    await _db.setSetting(_kSyncEpoch, '');
+    await _db.setSetting(_kLastBackup, '');
+    await _db.setSetting(_kUrl, '');
+    await _db.setSetting(_kToken, '');
+    await _loadServerConfig();
+    _serverCompatible = false;
     notifyListeners();
   }
 

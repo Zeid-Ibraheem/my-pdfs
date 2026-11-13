@@ -313,6 +313,42 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
 
 
+class EraseAllTest(unittest.TestCase):
+    def test_erase_everything(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "donnees"
+            data.mkdir()
+            (data / "server.env").write_text("MYPDFS_TOKEN=secret\n")
+            stopped = threading.Event()
+            settings = Settings(data_dir=data, quota_bytes=10**9, token=TOKEN)
+            port = free_port()
+            server = uvicorn.Server(uvicorn.Config(
+                create_app(settings, shutdown=stopped.set),
+                host="127.0.0.1", port=port, log_level="warning"))
+            thread = threading.Thread(target=server.run, daemon=True)
+            thread.start()
+            while not server.started:
+                time.sleep(0.05)
+            base = f"http://127.0.0.1:{port}"
+            try:
+                pdf = make_pdf(["Titre secret"])
+                requests.put(f"{base}/api/books/{sha(pdf)}", params={"title": "Secret"},
+                             data=pdf, headers=AUTH, timeout=5)
+                r = requests.post(f"{base}/api/erase-all", headers=AUTH, timeout=5,
+                                  json={"confirm": "SUPPRIMER"})
+                self.assertEqual(r.status_code, 400)  # mauvaise confirmation
+                r = requests.post(f"{base}/api/erase-all", headers=AUTH, timeout=10,
+                                  json={"confirm": "TOUT SUPPRIMER"})
+                self.assertEqual(r.status_code, 200, r.text)
+                self.assertTrue(stopped.wait(5))
+                self.assertEqual(list(data.rglob("*")), [])  # plus rien, même la config
+                r = requests.get(f"{base}/api/books", headers=AUTH, timeout=5)
+                self.assertEqual(r.status_code, 410)
+            finally:
+                server.should_exit = True
+                thread.join(timeout=5)
+
+
 class StoreTest(unittest.TestCase):
     def test_quota(self):
         with tempfile.TemporaryDirectory() as tmp:

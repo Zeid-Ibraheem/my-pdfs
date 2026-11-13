@@ -1,5 +1,9 @@
 # Historique des versions
 
+## 0.8.0
+- Réglages > « Tout rapatrier et vider le serveur » : télécharge sur le téléphone tous les livres absents, puis supprime absolument tout sur le serveur (livres, titres, texte, couvertures, état synchronisé, sauvegardes, configuration et jeton) et l'arrête. Rien n'est supprimé si un téléchargement échoue.
+- `server/uninstall.sh` : désinstalle complètement le serveur (service, environnement Python, données).
+
 ## 0.7.0
 - Version, clés de réglages et compatibilité appli ↔ serveur centralisées (`lib/config.dart`) ; l'appli prévient clairement si le serveur est trop ancien.
 - Serveur : migrations de schéma numérotées, SQLite en mode WAL, vérifications automatiques sur GitHub (CI).
